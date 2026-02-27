@@ -31,6 +31,7 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .target = target,
         .optimize = optimize,
         .link_libc = os == .linux,
+        .strip = optimize != .Debug,
         .imports = &.{
             .{ .name = "ondatra", .module = ondatra.module("ondatra") },
             .{ .name = "mcu_sdk", .module = mcu_sdk.module("mcu_sdk") },
