@@ -1816,7 +1816,7 @@ const State = struct {
 
             machine.executed = machine.idle_executed;
 
-            while (machine.executed < budget) {
+            while (machine.executed < budget and machine.isRunnable()) {
                 const before = machine.cpu.registers.cycle;
                 const state = machine.cpu.runCycles(budget - machine.executed);
 
