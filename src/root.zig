@@ -64,659 +64,672 @@ pub inline fn sizeOfField(comptime Type: type, comptime field_name: []const u8) 
     return @sizeOf(@FieldType(Type, field_name));
 }
 
+inline fn dmaFill(pattern: []const u8, dst: []u8) void {
+    var remaining: u32 = dst.len;
+    var dst_pos: u32 = 0;
+
+    while (remaining > 0) {
+        const chunk_len: u32 = @min(pattern.len, remaining);
+        @memmove(dst[dst_pos..][0..chunk_len], pattern[0..chunk_len]);
+
+        dst_pos += chunk_len;
+        remaining -= chunk_len;
+    }
+}
+
+pub const Tts = struct {
+    pub const NativeCommand = enum(u8) {
+        say = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.Num(@floatFromInt(@intFromEnum(this)));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        ready_status = 1,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    memory: [sdk.Tts.BUFFER_SIZE]u8 = std.mem.zeroes([sdk.Tts.BUFFER_SIZE]u8),
+    mmio: sdk.Tts = .{},
+
+    pub inline fn mmioRead(this: *Tts, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        switch (offset) {
+            @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                return bytes[rel_offset];
+            },
+            @offsetOf(sdk.Tts, "_status")...(@offsetOf(sdk.Tts, "_status") + @sizeOf(sdk.Tts.Status) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Tts, "_status");
+                const bytes = std.mem.asBytes(&this.mmio._status);
+
+                return bytes[rel_offset];
+            },
+            else => return null,
+        }
+    }
+
+    pub inline fn mmioWrite(this: *Tts, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.Tts, "_action")...(@offsetOf(sdk.Tts, "_action") + @sizeOf(sdk.Tts.Action) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Tts, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Tts.Action, "execute") => {
+                        if (!this.mmio._status.is_ready) {
+                            return false;
+                        }
+
+                        const term_pos = std.mem.indexOfScalar(u8, &this.memory, 0) orelse {
+                            return false;
+                        };
+
+                        const msg = this.memory[0 .. term_pos - 1 :0];
+
+                        if (msg.len == 0) {
+                            return false;
+                        }
+
+                        var byond_msg: x.ByondValue = .{};
+                        x.ByondValue_SetStr(&byond_msg, msg);
+
+                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.say.byond(), byond_msg });
+                    },
+                    @offsetOf(sdk.Tts.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub inline fn executeDma(this: *Tts, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
+        _ = slot;
+
+        switch (cfg.mode) {
+            .read => return false,
+            .write => {
+                if (cfg.dst_address +| cfg.len > this.memory.len) {
+                    return false;
+                }
+
+                if (cfg.src_address +| cfg.len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                @memcpy(this.memory[cfg.dst_address..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
+
+                return true;
+            },
+            .fill => {
+                if (cfg.dst_address +| cfg.len > this.memory.len) {
+                    return false;
+                }
+
+                if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
+                dmaFill(pattern, this.memory[cfg.dst_address..][0..cfg.len]);
+
+                return true;
+            },
+        }
+    }
+
+    pub inline fn syscall(this: *Tts, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .ready_status => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.is_ready = x.ByondValue_IsTrue(&args[1]);
+
+                if (this.mmio._status.is_ready) {
+                    this.mmio._status.last_event = .{ .ty = .ready };
+                    machine.updateExternalInterrupts();
+                }
+            },
+            _ => return x.False(),
+        }
+
+        return x.True();
+    }
+
+    pub inline fn isInterruptPending(this: *Tts, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupt_when_ready and this.mmio._status.last_event.ty == .ready) {
+            return true;
+        }
+
+        return false;
+    }
+};
+
+pub const SerialTerminal = struct {
+    pub const NativeCommand = enum(u8) {
+        write = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.Num(@floatFromInt(@intFromEnum(this)));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        write = 1,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    output: []u8,
+    input: []u8,
+    mmio: sdk.SerialTerminal = .{},
+
+    pub inline fn init(allocator: std.mem.Allocator) error{OutOfMemory}!SerialTerminal {
+        const output = try allocator.alloc(u8, sdk.SerialTerminal.OUTPUT_BUFFER_SIZE);
+        errdefer allocator.free(output);
+
+        const input = try allocator.alloc(u8, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
+        errdefer allocator.free(input);
+
+        return .{
+            .output = output,
+            .input = input,
+        };
+    }
+
+    pub inline fn mmioRead(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        switch (offset) {
+            @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                return bytes[rel_offset];
+            },
+            @offsetOf(sdk.SerialTerminal, "_status")...(@offsetOf(sdk.SerialTerminal, "_status") + @sizeOf(sdk.SerialTerminal.Status) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_status");
+                const bytes = std.mem.asBytes(&this.mmio._status);
+
+                return bytes[rel_offset];
+            },
+            else => return null,
+        }
+    }
+
+    pub inline fn mmioWrite(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+
+                return true;
+            },
+            @offsetOf(sdk.SerialTerminal, "_action")...(@offsetOf(sdk.SerialTerminal, "_action") + @sizeOf(sdk.SerialTerminal.Action) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.SerialTerminal.Action, "flush") => {
+                        const len = std.mem.indexOfScalar(u8, this.output, 0) orelse {
+                            return true;
+                        };
+
+                        if (len == 0) {
+                            return true;
+                        }
+
+                        var byond_bytes: x.ByondValue = .{};
+                        if (!x.Byond_CreateListLen(&byond_bytes, len)) {
+                            std.log.err("Failed to create a BYOND list for SerialTerminal output of len {}", .{len});
+
+                            return false;
+                        }
+
+                        for (0..len) |idx| {
+                            const byond_value = x.Num(@floatFromInt(this.output[idx]));
+                            const byond_idx = x.Num(@floatFromInt(idx + 1));
+
+                            if (!x.Byond_WriteListIndex(&byond_bytes, &byond_idx, &byond_value)) {
+                                std.log.err("Failed to write an output byte from Serial Terminal at {}", .{idx});
+                            }
+                        }
+
+                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.write.byond(), byond_bytes });
+                    },
+                    @offsetOf(sdk.SerialTerminal.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub inline fn executeDma(this: *SerialTerminal, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
+        _ = slot;
+
+        switch (cfg.mode) {
+            .read => {
+                if (cfg.dst_address +| cfg.len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                if (cfg.src_address +| cfg.len > this.input.len) {
+                    return false;
+                }
+
+                @memcpy(machine.cpu.ram[cfg.dst_address..][0..cfg.len], this.input[cfg.src_address..][0..cfg.len]);
+
+                return true;
+            },
+            .write => {
+                if (cfg.dst_address +| cfg.len > this.output.len) {
+                    return false;
+                }
+
+                if (cfg.src_address +| cfg.len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                @memcpy(this.output[cfg.dst_address..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
+
+                return true;
+            },
+            .fill => {
+                if (cfg.dst_address +| cfg.len > this.output.len) {
+                    return false;
+                }
+
+                if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
+                dmaFill(pattern, this.output[cfg.dst_address..][0..cfg.len]);
+
+                return true;
+            },
+        }
+    }
+
+    pub inline fn syscall(this: *SerialTerminal, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .write => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                const bytes = &args[1];
+
+                if (!x.ByondValue_IsList(bytes)) {
+                    return x.False();
+                }
+
+                var byond_bytes_len: x.ByondValue = .{};
+
+                if (!x.Byond_Length(bytes, &byond_bytes_len)) {
+                    return x.False();
+                }
+
+                var bytes_len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_bytes_len));
+                bytes_len = std.math.clamp(bytes_len, 0, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
+
+                for (0..bytes_len) |i| {
+                    const byond_idx = x.Num(@floatFromInt(i + 1));
+                    var byond_byte: x.ByondValue = .{};
+
+                    if (!x.Byond_ReadListIndex(bytes, &byond_idx, &byond_byte)) {
+                        this.input[i] = 0;
+                        bytes_len = i;
+
+                        break;
+                    }
+
+                    if (!x.ByondValue_IsNum(&byond_byte)) {
+                        this.input[i] = 0;
+                        bytes_len = i;
+
+                        break;
+                    }
+
+                    const byte: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_byte));
+                    this.input[i] = @truncate(byte);
+                }
+
+                if (bytes_len > 0) {
+                    this.mmio._status.last_event = .{ .ty = .new_data };
+                    this.mmio._status.len = @truncate(bytes_len);
+                    machine.updateExternalInterrupts();
+                }
+
+                return x.True();
+            },
+            _ => return x.False(),
+        }
+    }
+
+    pub inline fn isInterruptPending(this: *SerialTerminal, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_new_data and this.mmio._status.last_event.ty == .new_data) {
+            return true;
+        }
+
+        return false;
+    }
+
+    pub inline fn deinit(this: *SerialTerminal, allocator: std.mem.Allocator) void {
+        allocator.free(this.input);
+        allocator.free(this.output);
+    }
+};
+
+pub const Signaler = struct {
+    pub const NativeCommand = enum(u8) {
+        set = 1,
+        send = 2,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.Num(@floatFromInt(@intFromEnum(this)));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        pulse = 1,
+        ready_status = 2,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.Signaler = .{},
+
+    pub inline fn mmioRead(this: *Signaler, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        switch (offset) {
+            @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                return bytes[rel_offset];
+            },
+            @offsetOf(sdk.Signaler, "_status")...(@offsetOf(sdk.Signaler, "_status") + @sizeOf(sdk.Signaler.Status) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Signaler, "_status");
+                const bytes = std.mem.asBytes(&this.mmio._status);
+
+                return bytes[rel_offset];
+            },
+            else => return null,
+        }
+    }
+
+    pub inline fn mmioWrite(this: *Signaler, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+
+                return true;
+            },
+            @offsetOf(sdk.Signaler, "_action")...(@offsetOf(sdk.Signaler, "_action") + @sizeOf(sdk.Signaler.Action) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Signaler, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Signaler.Action, "set") => {
+                        if (!this.mmio._status.ready) {
+                            return false;
+                        }
+
+                        return machine.tryCallSyscallProc(&.{
+                            x.Num(@floatFromInt(slot)),
+                            NativeCommand.set.byond(),
+                            x.Num(@floatFromInt(this.mmio._config.frequency)),
+                            x.Num(@floatFromInt(this.mmio._config.code)),
+                        });
+                    },
+                    @offsetOf(sdk.Signaler.Action, "send") => {
+                        if (!this.mmio._status.ready) {
+                            return false;
+                        }
+
+                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.send.byond() });
+                    },
+                    @offsetOf(sdk.Signaler.Action, "ack") => {
+                        this.mmio._status.last_event = .{ .ty = .none };
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+
+        return false;
+    }
+
+    pub inline fn executeDma(this: *Signaler, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
+        _ = this;
+        _ = slot;
+        _ = machine;
+        _ = cfg;
+
+        return false;
+    }
+
+    pub inline fn syscall(this: *Signaler, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .pulse => {
+                if (args.len != 1) {
+                    return x.False();
+                }
+
+                this.mmio._status.last_event = .{ .ty = .pulse };
+                machine.updateExternalInterrupts();
+
+                return x.True();
+            },
+            .ready_status => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
+
+                if (this.mmio._status.ready) {
+                    this.mmio._status.last_event = .{ .ty = .ready };
+                    machine.updateExternalInterrupts();
+                }
+
+                return x.True();
+            },
+            else => return x.False(),
+        }
+
+        return x.False();
+    }
+
+    pub inline fn isInterruptPending(this: *Signaler, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
+            return true;
+        }
+
+        if (this.mmio._config.interrupts.on_pulse and this.mmio._status.last_event.ty == .pulse) {
+            return true;
+        }
+
+        return false;
+    }
+};
+
+pub const Device = union(enum) {
+    none,
+    tts: Tts,
+    serial_terminal: SerialTerminal,
+    signaler: Signaler,
+
+    pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        return switch (this.*) {
+            .none => return null,
+            .tts => return this.tts.mmioRead(slot, machine, offset),
+            .serial_terminal => return this.serial_terminal.mmioRead(slot, machine, offset),
+            .signaler => return this.signaler.mmioRead(slot, machine, offset),
+        };
+    }
+
+    pub inline fn mmioWrite(this: *Device, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        return switch (this.*) {
+            .none => return false,
+            .tts => return this.tts.mmioWrite(slot, machine, offset, value),
+            .serial_terminal => return this.serial_terminal.mmioWrite(slot, machine, offset, value),
+            .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
+        };
+    }
+
+    pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
+        return switch (this.*) {
+            .none => return false,
+            .tts => return this.tts.executeDma(slot, machine, cfg),
+            .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
+            .signaler => return this.signaler.executeDma(slot, machine, cfg),
+        };
+    }
+
+    pub inline fn syscall(this: *Device, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        return switch (this.*) {
+            .none => return x.ByondValue{},
+            .tts => return this.tts.syscall(slot, machine, args),
+            .serial_terminal => return this.serial_terminal.syscall(slot, machine, args),
+            .signaler => return this.signaler.syscall(slot, machine, args),
+        };
+    }
+
+    pub inline fn isInterruptPending(this: *Device, slot: u8, machine: *Machine) bool {
+        return switch (this.*) {
+            .none => return false,
+            .tts => return this.tts.isInterruptPending(slot, machine),
+            .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
+            .signaler => return this.signaler.isInterruptPending(slot, machine),
+        };
+    }
+
+    pub inline fn mmioSize(this: *const Device) usize {
+        return switch (this.*) {
+            .none => return 0,
+            .tts => return @sizeOf(sdk.Tts),
+            .serial_terminal => return @sizeOf(sdk.SerialTerminal),
+            .signaler => return @sizeOf(sdk.Signaler),
+        };
+    }
+
+    pub inline fn sdkType(this: *const Device) sdk.Pci.DeviceType {
+        return switch (this.*) {
+            .none => .none,
+            .tts => .tts,
+            .serial_terminal => .serial_terminal,
+            .signaler => .signaler,
+        };
+    }
+
+    pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
+        switch (this.*) {
+            .none, .tts, .signaler => {},
+            .serial_terminal => this.serial_terminal.deinit(allocator),
+        }
+    }
+};
+
+pub const Pci = struct {
+    mmio: sdk.Pci = .{},
+    devices: [sdk.Pci.MAX_DEVICES]Device = .{.none} ** sdk.Pci.MAX_DEVICES,
+
+    pub inline fn deinit(this: *Pci, allocator: std.mem.Allocator) void {
+        for (&this.devices) |*device| {
+            device.deinit(allocator);
+        }
+    }
+};
+
 const Machine = struct {
     pub const Id = usize;
 
     pub const State = enum(u8) {
         stopped = 1,
         running = 2,
-    };
-
-    pub const Pci = struct {
-        pub const Device = union(enum) {
-            pub const Tts = struct {
-                pub const NativeCommand = enum(u8) {
-                    say = 1,
-
-                    pub inline fn byond(this: NativeCommand) x.ByondValue {
-                        return x.Num(@floatFromInt(@intFromEnum(this)));
-                    }
-                };
-
-                pub const ByondCommand = enum(u8) {
-                    ready_status = 1,
-                    _,
-
-                    pub inline fn byond(v: *const x.ByondValue) ByondCommand {
-                        const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
-
-                        return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
-                    }
-                };
-
-                memory: [sdk.Tts.BUFFER_SIZE]u8 = std.mem.zeroes([sdk.Tts.BUFFER_SIZE]u8),
-                mmio: sdk.Tts = .{},
-
-                pub inline fn mmioRead(this: *Tts, slot: u8, machine: *Machine, offset: usize) ?u8 {
-                    _ = slot;
-                    _ = machine;
-
-                    switch (offset) {
-                        @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            return bytes[rel_offset];
-                        },
-                        @offsetOf(sdk.Tts, "_status")...(@offsetOf(sdk.Tts, "_status") + @sizeOf(sdk.Tts.Status) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Tts, "_status");
-                            const bytes = std.mem.asBytes(&this.mmio._status);
-
-                            return bytes[rel_offset];
-                        },
-                        else => return null,
-                    }
-                }
-
-                pub inline fn mmioWrite(this: *Tts, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
-                    switch (offset) {
-                        @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            bytes[rel_offset] = value;
-                            machine.updateExternalInterrupts();
-
-                            return true;
-                        },
-                        @offsetOf(sdk.Tts, "_action")...(@offsetOf(sdk.Tts, "_action") + @sizeOf(sdk.Tts.Action) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Tts, "_action");
-
-                            switch (rel_offset) {
-                                @offsetOf(sdk.Tts.Action, "execute") => {
-                                    if (!this.mmio._status.is_ready) {
-                                        return false;
-                                    }
-
-                                    const term_pos = std.mem.indexOfScalar(u8, &this.memory, 0) orelse {
-                                        return false;
-                                    };
-
-                                    const msg = this.memory[0 .. term_pos - 1 :0];
-
-                                    if (msg.len == 0) {
-                                        return false;
-                                    }
-
-                                    var byond_msg: x.ByondValue = .{};
-                                    x.ByondValue_SetStr(&byond_msg, msg);
-
-                                    return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.say.byond(), byond_msg });
-                                },
-                                @offsetOf(sdk.Tts.Action, "ack") => {
-                                    this.mmio._status.last_event = .{};
-                                    machine.updateExternalInterrupts();
-
-                                    return true;
-                                },
-                                else => return false,
-                            }
-                        },
-                        else => return false,
-                    }
-                }
-
-                pub inline fn executeDma(this: *Tts, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
-                    _ = slot;
-
-                    switch (cfg.mode) {
-                        .read => return false,
-                        .write => {
-                            if (cfg.dst_address +| cfg.len > this.memory.len) {
-                                return false;
-                            }
-
-                            if (cfg.src_address +| cfg.len > machine.cpu.ram.len) {
-                                return false;
-                            }
-
-                            @memcpy(this.memory[cfg.dst_address..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
-
-                            return true;
-                        },
-                        .fill => {
-                            if (cfg.dst_address +| cfg.len > this.memory.len) {
-                                return false;
-                            }
-
-                            if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
-                                return false;
-                            }
-
-                            const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
-                            dmaFill(pattern, this.memory[cfg.dst_address..][0..cfg.len]);
-
-                            return true;
-                        },
-                    }
-                }
-
-                pub inline fn syscall(this: *Tts, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
-                    _ = slot;
-
-                    if (args.len == 0) {
-                        return x.False();
-                    }
-
-                    switch (ByondCommand.byond(&args[0])) {
-                        .ready_status => {
-                            if (args.len != 2) {
-                                return x.False();
-                            }
-
-                            this.mmio._status.is_ready = x.ByondValue_IsTrue(&args[1]);
-
-                            if (this.mmio._status.is_ready) {
-                                this.mmio._status.last_event = .{ .ty = .ready };
-                                machine.updateExternalInterrupts();
-                            }
-                        },
-                        _ => return x.False(),
-                    }
-
-                    return x.True();
-                }
-
-                pub inline fn isInterruptPending(this: *Tts, slot: u8, machine: *Machine) bool {
-                    _ = slot;
-                    _ = machine;
-
-                    if (this.mmio._config.interrupt_when_ready and this.mmio._status.last_event.ty == .ready) {
-                        return true;
-                    }
-
-                    return false;
-                }
-            };
-
-            pub const SerialTerminal = struct {
-                pub const NativeCommand = enum(u8) {
-                    write = 1,
-
-                    pub inline fn byond(this: NativeCommand) x.ByondValue {
-                        return x.Num(@floatFromInt(@intFromEnum(this)));
-                    }
-                };
-
-                pub const ByondCommand = enum(u8) {
-                    write = 1,
-                    _,
-
-                    pub inline fn byond(v: *const x.ByondValue) ByondCommand {
-                        const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
-
-                        return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
-                    }
-                };
-
-                output: []u8,
-                input: []u8,
-                mmio: sdk.SerialTerminal = .{},
-
-                pub inline fn init(allocator: std.mem.Allocator) error{OutOfMemory}!SerialTerminal {
-                    const output = try allocator.alloc(u8, sdk.SerialTerminal.OUTPUT_BUFFER_SIZE);
-                    errdefer allocator.free(output);
-
-                    const input = try allocator.alloc(u8, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
-                    errdefer allocator.free(input);
-
-                    return .{
-                        .output = output,
-                        .input = input,
-                    };
-                }
-
-                pub inline fn mmioRead(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize) ?u8 {
-                    _ = slot;
-                    _ = machine;
-
-                    switch (offset) {
-                        @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            return bytes[rel_offset];
-                        },
-                        @offsetOf(sdk.SerialTerminal, "_status")...(@offsetOf(sdk.SerialTerminal, "_status") + @sizeOf(sdk.SerialTerminal.Status) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_status");
-                            const bytes = std.mem.asBytes(&this.mmio._status);
-
-                            return bytes[rel_offset];
-                        },
-                        else => return null,
-                    }
-                }
-
-                pub inline fn mmioWrite(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
-                    switch (offset) {
-                        @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            bytes[rel_offset] = value;
-
-                            return true;
-                        },
-                        @offsetOf(sdk.SerialTerminal, "_action")...(@offsetOf(sdk.SerialTerminal, "_action") + @sizeOf(sdk.SerialTerminal.Action) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_action");
-
-                            switch (rel_offset) {
-                                @offsetOf(sdk.SerialTerminal.Action, "flush") => {
-                                    const len = std.mem.indexOfScalar(u8, this.output, 0) orelse {
-                                        return true;
-                                    };
-
-                                    if (len == 0) {
-                                        return true;
-                                    }
-
-                                    var byond_bytes: x.ByondValue = .{};
-                                    if (!x.Byond_CreateListLen(&byond_bytes, len)) {
-                                        std.log.err("Failed to create a BYOND list for SerialTerminal output of len {}", .{len});
-
-                                        return false;
-                                    }
-
-                                    for (0..len) |idx| {
-                                        const byond_value = x.Num(@floatFromInt(this.output[idx]));
-                                        const byond_idx = x.Num(@floatFromInt(idx + 1));
-
-                                        if (!x.Byond_WriteListIndex(&byond_bytes, &byond_idx, &byond_value)) {
-                                            std.log.err("Failed to write an output byte from Serial Terminal at {}", .{idx});
-                                        }
-                                    }
-
-                                    return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.write.byond(), byond_bytes });
-                                },
-                                @offsetOf(sdk.SerialTerminal.Action, "ack") => {
-                                    this.mmio._status.last_event = .{};
-                                    machine.updateExternalInterrupts();
-
-                                    return true;
-                                },
-                                else => return false,
-                            }
-                        },
-                        else => return false,
-                    }
-                }
-
-                pub inline fn executeDma(this: *SerialTerminal, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
-                    _ = slot;
-
-                    switch (cfg.mode) {
-                        .read => {
-                            if (cfg.dst_address +| cfg.len > machine.cpu.ram.len) {
-                                return false;
-                            }
-
-                            if (cfg.src_address +| cfg.len > this.input.len) {
-                                return false;
-                            }
-
-                            @memcpy(machine.cpu.ram[cfg.dst_address..][0..cfg.len], this.input[cfg.src_address..][0..cfg.len]);
-
-                            return true;
-                        },
-                        .write => {
-                            if (cfg.dst_address +| cfg.len > this.output.len) {
-                                return false;
-                            }
-
-                            if (cfg.src_address +| cfg.len > machine.cpu.ram.len) {
-                                return false;
-                            }
-
-                            @memcpy(this.output[cfg.dst_address..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
-
-                            return true;
-                        },
-                        .fill => {
-                            if (cfg.dst_address +| cfg.len > this.output.len) {
-                                return false;
-                            }
-
-                            if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
-                                return false;
-                            }
-
-                            const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
-                            dmaFill(pattern, this.output[cfg.dst_address..][0..cfg.len]);
-
-                            return true;
-                        },
-                    }
-                }
-
-                pub inline fn syscall(this: *SerialTerminal, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
-                    _ = slot;
-
-                    if (args.len == 0) {
-                        return x.False();
-                    }
-
-                    switch (ByondCommand.byond(&args[0])) {
-                        .write => {
-                            if (args.len != 2) {
-                                return x.False();
-                            }
-
-                            const bytes = &args[1];
-
-                            if (!x.ByondValue_IsList(bytes)) {
-                                return x.False();
-                            }
-
-                            var byond_bytes_len: x.ByondValue = .{};
-
-                            if (!x.Byond_Length(bytes, &byond_bytes_len)) {
-                                return x.False();
-                            }
-
-                            var bytes_len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_bytes_len));
-                            bytes_len = std.math.clamp(bytes_len, 0, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
-
-                            for (0..bytes_len) |i| {
-                                const byond_idx = x.Num(@floatFromInt(i + 1));
-                                var byond_byte: x.ByondValue = .{};
-
-                                if (!x.Byond_ReadListIndex(bytes, &byond_idx, &byond_byte)) {
-                                    this.input[i] = 0;
-                                    bytes_len = i;
-
-                                    break;
-                                }
-
-                                if (!x.ByondValue_IsNum(&byond_byte)) {
-                                    this.input[i] = 0;
-                                    bytes_len = i;
-
-                                    break;
-                                }
-
-                                const byte: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_byte));
-                                this.input[i] = @truncate(byte);
-                            }
-
-                            if (bytes_len > 0) {
-                                this.mmio._status.last_event = .{ .ty = .new_data };
-                                this.mmio._status.len = @truncate(bytes_len);
-                                machine.updateExternalInterrupts();
-                            }
-
-                            return x.True();
-                        },
-                        _ => return x.False(),
-                    }
-                }
-
-                pub inline fn isInterruptPending(this: *SerialTerminal, slot: u8, machine: *Machine) bool {
-                    _ = slot;
-                    _ = machine;
-
-                    if (this.mmio._config.interrupts.on_new_data and this.mmio._status.last_event.ty == .new_data) {
-                        return true;
-                    }
-
-                    return false;
-                }
-
-                pub inline fn deinit(this: *SerialTerminal, allocator: std.mem.Allocator) void {
-                    allocator.free(this.input);
-                    allocator.free(this.output);
-                }
-            };
-
-            pub const Signaler = struct {
-                pub const NativeCommand = enum(u8) {
-                    set = 1,
-                    send = 2,
-
-                    pub inline fn byond(this: NativeCommand) x.ByondValue {
-                        return x.Num(@floatFromInt(@intFromEnum(this)));
-                    }
-                };
-
-                pub const ByondCommand = enum(u8) {
-                    pulse = 1,
-                    ready_status = 2,
-                    _,
-
-                    pub inline fn byond(v: *const x.ByondValue) ByondCommand {
-                        const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
-
-                        return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
-                    }
-                };
-
-                mmio: sdk.Signaler = .{},
-
-                pub inline fn mmioRead(this: *Signaler, slot: u8, machine: *Machine, offset: usize) ?u8 {
-                    _ = slot;
-                    _ = machine;
-
-                    switch (offset) {
-                        @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            return bytes[rel_offset];
-                        },
-                        @offsetOf(sdk.Signaler, "_status")...(@offsetOf(sdk.Signaler, "_status") + @sizeOf(sdk.Signaler.Status) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Signaler, "_status");
-                            const bytes = std.mem.asBytes(&this.mmio._status);
-
-                            return bytes[rel_offset];
-                        },
-                        else => return null,
-                    }
-                }
-
-                pub inline fn mmioWrite(this: *Signaler, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
-                    switch (offset) {
-                        @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
-                            const bytes = std.mem.asBytes(&this.mmio._config);
-
-                            bytes[rel_offset] = value;
-
-                            return true;
-                        },
-                        @offsetOf(sdk.Signaler, "_action")...(@offsetOf(sdk.Signaler, "_action") + @sizeOf(sdk.Signaler.Action) - 1) => {
-                            const rel_offset = offset - @offsetOf(sdk.Signaler, "_action");
-
-                            switch (rel_offset) {
-                                @offsetOf(sdk.Signaler.Action, "set") => {
-                                    if (!this.mmio._status.ready) {
-                                        return false;
-                                    }
-
-                                    return machine.tryCallSyscallProc(&.{
-                                        x.Num(@floatFromInt(slot)),
-                                        NativeCommand.set.byond(),
-                                        x.Num(@floatFromInt(this.mmio._config.frequency)),
-                                        x.Num(@floatFromInt(this.mmio._config.code)),
-                                    });
-                                },
-                                @offsetOf(sdk.Signaler.Action, "send") => {
-                                    if (!this.mmio._status.ready) {
-                                        return false;
-                                    }
-
-                                    return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.send.byond() });
-                                },
-                                @offsetOf(sdk.Signaler.Action, "ack") => {
-                                    this.mmio._status.last_event = .{ .ty = .none };
-                                    machine.updateExternalInterrupts();
-
-                                    return true;
-                                },
-                                else => return false,
-                            }
-                        },
-                        else => return false,
-                    }
-
-                    return false;
-                }
-
-                pub inline fn executeDma(this: *Signaler, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
-                    _ = this;
-                    _ = slot;
-                    _ = machine;
-                    _ = cfg;
-
-                    return false;
-                }
-
-                pub inline fn syscall(this: *Signaler, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
-                    _ = slot;
-
-                    if (args.len == 0) {
-                        return x.False();
-                    }
-
-                    switch (ByondCommand.byond(&args[0])) {
-                        .pulse => {
-                            if (args.len != 1) {
-                                return x.False();
-                            }
-
-                            this.mmio._status.last_event = .{ .ty = .pulse };
-                            machine.updateExternalInterrupts();
-
-                            return x.True();
-                        },
-                        .ready_status => {
-                            if (args.len != 2) {
-                                return x.False();
-                            }
-
-                            this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
-
-                            if (this.mmio._status.ready) {
-                                this.mmio._status.last_event = .{ .ty = .ready };
-                                machine.updateExternalInterrupts();
-                            }
-
-                            return x.True();
-                        },
-                        else => return x.False(),
-                    }
-
-                    return x.False();
-                }
-
-                pub inline fn isInterruptPending(this: *Signaler, slot: u8, machine: *Machine) bool {
-                    _ = slot;
-                    _ = machine;
-
-                    if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
-                        return true;
-                    }
-
-                    if (this.mmio._config.interrupts.on_pulse and this.mmio._status.last_event.ty == .pulse) {
-                        return true;
-                    }
-
-                    return false;
-                }
-            };
-
-            none,
-            tts: Tts,
-            serial_terminal: SerialTerminal,
-            signaler: Signaler,
-
-            pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
-                return switch (this.*) {
-                    .none => return null,
-                    .tts => return this.tts.mmioRead(slot, machine, offset),
-                    .serial_terminal => return this.serial_terminal.mmioRead(slot, machine, offset),
-                    .signaler => return this.signaler.mmioRead(slot, machine, offset),
-                };
-            }
-
-            pub inline fn mmioWrite(this: *Device, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
-                return switch (this.*) {
-                    .none => return false,
-                    .tts => return this.tts.mmioWrite(slot, machine, offset, value),
-                    .serial_terminal => return this.serial_terminal.mmioWrite(slot, machine, offset, value),
-                    .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
-                };
-            }
-
-            pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
-                return switch (this.*) {
-                    .none => return false,
-                    .tts => return this.tts.executeDma(slot, machine, cfg),
-                    .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
-                    .signaler => return this.signaler.executeDma(slot, machine, cfg),
-                };
-            }
-
-            pub inline fn syscall(this: *Device, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
-                return switch (this.*) {
-                    .none => return x.ByondValue{},
-                    .tts => return this.tts.syscall(slot, machine, args),
-                    .serial_terminal => return this.serial_terminal.syscall(slot, machine, args),
-                    .signaler => return this.signaler.syscall(slot, machine, args),
-                };
-            }
-
-            pub inline fn isInterruptPending(this: *Device, slot: u8, machine: *Machine) bool {
-                return switch (this.*) {
-                    .none => return false,
-                    .tts => return this.tts.isInterruptPending(slot, machine),
-                    .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
-                    .signaler => return this.signaler.isInterruptPending(slot, machine),
-                };
-            }
-
-            pub inline fn mmioSize(this: *const Device) usize {
-                return switch (this.*) {
-                    .none => return 0,
-                    .tts => return @sizeOf(sdk.Tts),
-                    .serial_terminal => return @sizeOf(sdk.SerialTerminal),
-                    .signaler => return @sizeOf(sdk.Signaler),
-                };
-            }
-
-            pub inline fn sdkType(this: *const Device) sdk.Pci.DeviceType {
-                return switch (this.*) {
-                    .none => .none,
-                    .tts => .tts,
-                    .serial_terminal => .serial_terminal,
-                    .signaler => .signaler,
-                };
-            }
-
-            pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
-                switch (this.*) {
-                    .none, .tts, .signaler => {},
-                    .serial_terminal => this.serial_terminal.deinit(allocator),
-                }
-            }
-        };
-
-        mmio: sdk.Pci = .{},
-        devices: [sdk.Pci.MAX_DEVICES]Device = .{.none} ** sdk.Pci.MAX_DEVICES,
-
-        pub inline fn deinit(this: *Pci, allocator: std.mem.Allocator) void {
-            for (&this.devices) |*device| {
-                device.deinit(allocator);
-            }
-        }
     };
 
     pub const Cpu = ondatra.cpu.Cpu(.{
@@ -835,7 +848,7 @@ const Machine = struct {
         return entry.syscall(slot, this, args);
     }
 
-    pub inline fn tryAttachPci(this: *Machine, device: Pci.Device) ?u8 {
+    pub inline fn tryAttachPci(this: *Machine, device: Device) ?u8 {
         const mmio_size = device.mmioSize();
         const alignment = std.mem.Alignment.of(u32);
 
@@ -1213,19 +1226,6 @@ const Machine = struct {
         }
 
         return device.executeDma(this.dma._config.channel, this, this.dma._config);
-    }
-
-    inline fn dmaFill(pattern: []const u8, dst: []u8) void {
-        var remaining: u32 = dst.len;
-        var dst_pos: u32 = 0;
-
-        while (remaining > 0) {
-            const chunk_len: u32 = @min(pattern.len, remaining);
-            @memmove(dst[dst_pos..][0..chunk_len], pattern[0..chunk_len]);
-
-            dst_pos += chunk_len;
-            remaining -= chunk_len;
-        }
     }
 
     inline fn instructionCost(instruction: ondatra.arch.Instruction) usize {
@@ -1727,7 +1727,7 @@ const State = struct {
             return MachineAttachPciError.BadDeviceType;
         };
 
-        const device: Machine.Pci.Device = switch (sdk_type_id) {
+        const device: Device = switch (sdk_type_id) {
             .none, _ => {
                 this.last_error = @errorName(MachineAttachPciError.BadDeviceType);
 
@@ -1735,7 +1735,7 @@ const State = struct {
             },
             .tts => .{ .tts = .{} },
             .serial_terminal => .{
-                .serial_terminal = Machine.Pci.Device.SerialTerminal.init(this.alloc.allocator()) catch {
+                .serial_terminal = SerialTerminal.init(this.alloc.allocator()) catch {
                     std.log.err("Failed to allocate memory for a serial terminal device", .{});
                     this.last_error = @errorName(MachineAttachPciError.OutOfMemory);
 
