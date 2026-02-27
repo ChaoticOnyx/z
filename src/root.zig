@@ -1845,8 +1845,7 @@ const State = struct {
                         machine.executed += skipped;
                         machine.idle_executed += skipped;
                     },
-                    .trap => |trap| {
-                        std.log.info("trap: {any}", .{trap});
+                    .trap => {
                         machine.tryCallTrapProc();
 
                         break;
