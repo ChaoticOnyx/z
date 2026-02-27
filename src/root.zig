@@ -602,7 +602,7 @@ const Machine = struct {
                                 return x.False();
                             }
 
-                            this.mmio._status.ready = x.ByondValue_IsTrue(&args[2]);
+                            this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
 
                             if (this.mmio._status.ready) {
                                 this.mmio._status.last_event = .{ .ty = .ready };
