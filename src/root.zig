@@ -1352,6 +1352,11 @@ pub const MachineAppendCountersError = error{
     MachineNotFound,
 };
 
+pub const MachineDumpRegistersError = error{
+    MachineNotFound,
+    OutOfMemory,
+};
+
 const State = struct {
     pub const Stats = struct {
         last_wall_us: u64 = 0,
@@ -1867,6 +1872,28 @@ const State = struct {
 
         this.robin_index = (this.robin_index + 1) % this.machines.items.len;
         this.updateStats(wall_start, delta_us);
+    }
+
+    pub inline fn machineDumpRegisters(this: *State, id: Machine.Id) MachineDumpRegistersError![:0]u8 {
+        const machine = this.findMachine(id) orelse {
+            this.last_error = @errorName(MachineDumpRegistersError.MachineNotFound);
+
+            return MachineDumpRegistersError.MachineNotFound;
+        };
+
+        var writer: std.Io.Writer.Allocating = .init(this.alloc.allocator());
+        std.json.Stringify.value(machine.cpu.registers, .{}, &writer.writer) catch {
+            this.last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
+
+            return MachineDumpRegistersError.OutOfMemory;
+        };
+        errdefer writer.deinit();
+
+        return writer.toOwnedSliceSentinel(0) catch {
+            this.last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
+
+            return MachineDumpRegistersError.OutOfMemory;
+        };
     }
 
     pub inline fn machineDestroy(this: *State, id: Machine.Id) bool {
@@ -2514,6 +2541,29 @@ pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) call
         @bitCast(x.True())
     else
         @bitCast(x.False());
+}
+
+pub export fn Z_machine_dump_registers(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+    const args = argv[0..argc];
+
+    if (args.len != 1) {
+        x.Byond_CRASH("Z_machine_dump_registers requires 1 argument");
+
+        return 0;
+    }
+
+    const state = getState();
+    const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
+
+    const dump = state.machineDumpRegisters(id) catch {
+        return 0;
+    };
+    defer state.alloc.allocator().free(dump);
+
+    var ret: x.ByondValue = .{};
+    x.ByondValue_SetStr(&ret, dump);
+
+    return @bitCast(ret);
 }
 
 pub export fn Z_machine_destroy(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
