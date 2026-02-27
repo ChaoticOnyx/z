@@ -44,14 +44,14 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
 
 fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
     const windows_lib = b.addLibrary(.{
-        .name = "z",
+        .name = "libz",
         .linkage = .dynamic,
         .root_module = createRootModule(b, .windows, optimize),
     });
     b.installArtifact(windows_lib);
 
     const linux_lib = b.addLibrary(.{
-        .name = "z",
+        .name = "libz",
         .linkage = .dynamic,
         .root_module = createRootModule(b, .linux, optimize),
     });
