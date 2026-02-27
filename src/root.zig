@@ -537,6 +537,10 @@ const Machine = struct {
 
                             switch (rel_offset) {
                                 @offsetOf(sdk.Signaler.Action, "set") => {
+                                    if (!this.mmio._status.ready) {
+                                        return false;
+                                    }
+
                                     return machine.tryCallSyscallProc(&.{
                                         x.Num(@floatFromInt(slot)),
                                         NativeCommand.set.byond(),
@@ -545,6 +549,10 @@ const Machine = struct {
                                     });
                                 },
                                 @offsetOf(sdk.Signaler.Action, "send") => {
+                                    if (!this.mmio._status.ready) {
+                                        return false;
+                                    }
+
                                     return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.send.byond() });
                                 },
                                 @offsetOf(sdk.Signaler.Action, "ack") => {
