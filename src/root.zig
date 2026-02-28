@@ -1977,16 +1977,24 @@ inline fn getState() *State {
     return &_state.?;
 }
 
-// all the exported functions should return ByondValue as a u64 number,
-// otherwise your balls will explode.
+// Thank you brain-dead MSVC/LLVM developers.
+const ReturnType = if (builtin.os.tag == .windows) u64 else x.ByondValue;
 
-pub export fn Z_get_last_error(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+inline fn returnCast(in: x.ByondValue) ReturnType {
+    if (comptime builtin.os.tag == .windows) {
+        return @bitCast(in);
+    } else {
+        return in;
+    }
+}
+
+pub export fn Z_get_last_error(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     _ = argv;
 
     if (argc != 0) {
         x.Byond_CRASH("Z_get_last_error does not accept args");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -1996,52 +2004,52 @@ pub export fn Z_get_last_error(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c)
         x.ByondValue_SetStr(&ret, msg);
     }
 
-    return @bitCast(ret);
+    return returnCast(ret);
 }
 
-pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     _ = argv;
 
     if (argc != 0) {
         x.Byond_CRASH("Z_machine_create does not accept args");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id = state.machineCreate() catch {
-        return 0;
+        return returnCast(.{});
     };
 
-    return @bitCast(x.Num(@floatFromInt(id)));
+    return returnCast(x.Num(@floatFromInt(id)));
 }
 
-pub export fn Z_machine_reset(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_reset(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_reset requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     state.machineReset(id) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_connect(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_connect(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_macine_connect requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2049,19 +2057,19 @@ pub export fn Z_machine_connect(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c
     const src_object = &args[1];
 
     state.machineConnect(id, if (x.ByondValue_IsNull(src_object)) null else src_object.*) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_ram_size requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2069,38 +2077,38 @@ pub export fn Z_machine_set_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callco
     const ram_size: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     state.machineSetRamSize(id, ram_size) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_get_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_get_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_get_ram_size requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const size = state.machineGetRamSize(id) catch {
-        return 0;
+        return returnCast(.{});
     };
 
-    return @bitCast(x.Num(@floatFromInt(size)));
+    return returnCast(x.Num(@floatFromInt(size)));
 }
 
-pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_read_ram_byte requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2108,19 +2116,19 @@ pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callc
     const address: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     const value = state.machineReadRamByte(id, address) catch {
-        return 0;
+        return returnCast(.{});
     };
 
-    return @bitCast(x.Num(@floatFromInt(value)));
+    return returnCast(x.Num(@floatFromInt(value)));
 }
 
-pub export fn Z_machine_write_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_write_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 3) {
         x.Byond_CRASH("Z_machine_write_ram_byte requires 3 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2129,19 +2137,19 @@ pub export fn Z_machine_write_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) call
     const value: u8 = @intFromFloat(x.ByondValue_GetNum(&args[2]));
 
     state.machineWriteRamByte(id, address, value) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_read_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_read_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 3) {
         x.Byond_CRASH("Z_machine_read_ram_bytes requires 3 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2152,23 +2160,23 @@ pub export fn Z_machine_read_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) call
     if (!x.ByondValue_IsList(dst)) {
         x.Byond_CRASH("Z_machine_read_ram_bytes requires a list as the third argument");
 
-        return @bitCast(x.False());
+        return returnCast(x.False());
     }
 
     state.machineReadRamBytes(id, address, dst) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_write_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_write_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 3) {
         x.Byond_CRASH("Z_machine_write_ram_bytes requires 3 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2179,23 +2187,23 @@ pub export fn Z_machine_write_ram_bytes(argc: x.u4c, argv: [*c]x.ByondValue) cal
     if (!x.ByondValue_IsList(src)) {
         x.Byond_CRASH("Z_machine_write_ram_bytes requires a list as the third argument");
 
-        return @bitCast(x.False());
+        return returnCast(x.False());
     }
 
     state.machineWriteRamBytes(id, address, src) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_frequency(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_frequency(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_frequency requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2203,19 +2211,19 @@ pub export fn Z_machine_set_frequency(argc: x.u4c, argv: [*c]x.ByondValue) callc
     const frequency: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     state.machineSetFrequency(id, frequency) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_state requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2223,77 +2231,77 @@ pub export fn Z_machine_set_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(
     const machine_state: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     state.machineSetState(id, machine_state) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_get_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_get_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_get_state requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const machine_state = state.machineGetState(id) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.Num(@floatFromInt(@intFromEnum(machine_state))));
+    return returnCast(x.Num(@floatFromInt(@intFromEnum(machine_state))));
 }
 
-pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_get_utilization requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const utilization = state.machineGetUtilization(id) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.Num(utilization));
+    return returnCast(x.Num(utilization));
 }
 
-pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_get_executed requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const executed = state.machineGetExecuted(id) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
     const executed_32: u32 = @truncate(executed);
 
-    return @bitCast(x.Num(@floatFromInt(executed_32)));
+    return returnCast(x.Num(@floatFromInt(executed_32)));
 }
 
-pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 5) {
         x.Byond_CRASH("Z_machine_set_sensors requires 5 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2304,19 +2312,19 @@ pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callcon
     const throttled = x.ByondValue_IsTrue(&args[4]);
 
     state.machineSetSensors(id, @truncate(temperature), @truncate(power_usage), overheat, throttled) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_post_tick_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_post_tick_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_post_tick_proc requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2325,32 +2333,32 @@ pub export fn Z_machine_set_post_tick_proc(argc: x.u4c, argv: [*c]x.ByondValue) 
 
     if (x.ByondValue_IsNull(proc)) {
         state.machineSetPostTickProc(id, null) catch {
-            return @bitCast(x.False());
+            return returnCast(x.False());
         };
 
-        return @bitCast(x.True());
+        return returnCast(x.True());
     }
 
     if (!x.ByondValue_IsStr(proc)) {
         x.Byond_CRASH("The proc name should be a string");
 
-        return @bitCast(x.False());
+        return returnCast(x.False());
     }
 
     state.machineSetPostTickProc(id, x.ByondValue_GetRef(proc)) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_trap_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_trap_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_trap_proc requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2362,29 +2370,29 @@ pub export fn Z_machine_set_trap_proc(argc: x.u4c, argv: [*c]x.ByondValue) callc
             return @bitCast(x.False());
         };
 
-        return @bitCast(x.True());
+        return returnCast(x.True());
     }
 
     if (!x.ByondValue_IsStr(proc)) {
         x.Byond_CRASH("The proc name should be a string");
 
-        return @bitCast(x.False());
+        return returnCast(x.False());
     }
 
     state.machineSetTrapProc(id, x.ByondValue_GetRef(proc)) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_set_syscall_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_set_syscall_proc(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_set_syscall_proc requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2393,32 +2401,32 @@ pub export fn Z_machine_set_syscall_proc(argc: x.u4c, argv: [*c]x.ByondValue) ca
 
     if (x.ByondValue_IsNull(proc)) {
         state.machineSetSyscallProc(id, null) catch {
-            return @bitCast(x.False());
+            return returnCast(x.False());
         };
 
-        return @bitCast(x.True());
+        return returnCast(x.True());
     }
 
     if (!x.ByondValue_IsStr(proc)) {
         x.Byond_CRASH("The proc name should be a string");
 
-        return 0;
+        return returnCast(.{});
     }
 
     state.machineSetSyscallProc(id, x.ByondValue_GetRef(proc)) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_append_counters(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_append_counters(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 4) {
         x.Byond_CRASH("Z_machine_append_cycles requires 3 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2428,19 +2436,19 @@ pub export fn Z_machine_append_counters(argc: x.u4c, argv: [*c]x.ByondValue) cal
     const mtime: u32 = @intFromFloat(x.ByondValue_GetNum(&args[3]));
 
     state.machineAppendCounters(id, cycles, idle_cycles, mtime) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_load_elf(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_load_elf(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_load_elf requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2452,36 +2460,36 @@ pub export fn Z_machine_load_elf(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.
     if (!x.Byond_ToString(byond_path, null, &len) and len == 0) {
         x.Byond_CRASH("Failed to convert the path argument to a string");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const path = state.alloc.allocator().allocSentinel(u8, len - 1, 0) catch {
         x.Byond_CRASH("Failed to allocate a memory for a path: Out of memory");
 
-        return 0;
+        return returnCast(.{});
     };
     defer state.alloc.allocator().free(path);
 
     if (!x.Byond_ToString(byond_path, path.ptr, &len)) {
         x.Byond_CRASH("Failed to convert the path argument to a string");
 
-        return 0;
+        return returnCast(.{});
     }
 
     state.machineLoadElf(id, path) catch {
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machine_syscall(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_syscall(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len < 2) {
         x.Byond_CRASH("Z_machine_syscall requires at least 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2489,19 +2497,19 @@ pub export fn Z_machine_syscall(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c
     const slot: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     const ret = state.machineSyscall(id, @truncate(slot), args[2..]) catch {
-        return 0;
+        return returnCast(.{});
     };
 
-    return @bitCast(ret);
+    return returnCast(ret);
 }
 
-pub export fn Z_machine_try_attach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_try_attach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_try_attach_pci requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2509,23 +2517,23 @@ pub export fn Z_machine_try_attach_pci(argc: x.u4c, argv: [*c]x.ByondValue) call
     const type_id: u8 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     const pci_slot = state.machineTryAttachPci(id, type_id) catch {
-        return 0;
+        return returnCast(.{});
     };
 
     if (pci_slot == null) {
-        return 0;
+        return returnCast(.{});
     }
 
-    return @bitCast(x.Num(@floatFromInt(pci_slot.?)));
+    return returnCast(x.Num(@floatFromInt(pci_slot.?)));
 }
 
-pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 2) {
         x.Byond_CRASH("Z_machine_try_detach_pci requires 2 arguments");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2533,45 +2541,45 @@ pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) call
     const slot: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
 
     const was_removed = state.machineTryDetachPci(id, @truncate(slot)) catch {
-        return 0;
+        return returnCast(.{});
     };
 
     return if (was_removed)
-        @bitCast(x.True())
+        returnCast(x.True())
     else
-        @bitCast(x.False());
+        returnCast(x.False());
 }
 
-pub export fn Z_machine_dump_registers(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_dump_registers(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_dump_registers requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const dump = state.machineDumpRegisters(id) catch {
-        return 0;
+        return returnCast(.{});
     };
     defer state.alloc.allocator().free(dump);
 
     var ret: x.ByondValue = .{};
     x.ByondValue_SetStr(&ret, dump);
 
-    return @bitCast(ret);
+    return returnCast(ret);
 }
 
-pub export fn Z_machine_destroy(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machine_destroy(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machine_destroy requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2580,13 +2588,13 @@ pub export fn Z_machine_destroy(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c
     return if (state.machineDestroy(id)) @bitCast(x.True()) else @bitCast(x.False());
 }
 
-pub export fn Z_machines_tick(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machines_tick(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machines_tick requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2594,16 +2602,16 @@ pub export fn Z_machines_tick(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) 
 
     state.machinesTick(delta_us);
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_machines_stats(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machines_stats(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     _ = argv;
 
     if (argc != 0) {
         x.Byond_CRASH("Z_machines_stats does not accept args");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const state = getState();
@@ -2615,28 +2623,28 @@ pub export fn Z_machines_stats(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c)
     std.json.Stringify.value(stats, .{}, &writer) catch {
         x.Byond_CRASH("Failed to format the stats");
 
-        return @bitCast(x.False());
+        return returnCast(x.False());
     };
 
     writer.writeByte(0) catch {
         x.Byond_CRASH("Failed to format the stats");
 
-        return 0;
+        return returnCast(.{});
     };
 
     var ret: x.ByondValue = .{};
     x.ByondValue_SetStr(&ret, buffer[0 .. writer.end - 1 :0]);
 
-    return @bitCast(ret);
+    return returnCast(ret);
 }
 
-pub export fn Z_machines_set_budget(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_machines_set_budget(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
     if (args.len != 1) {
         x.Byond_CRASH("Z_machines_set_budget requires 1 argument");
 
-        return 0;
+        return returnCast(.{});
     }
 
     const budget: u32 = @intFromFloat(x.ByondValue_GetNum(&args[0]));
@@ -2644,10 +2652,10 @@ pub export fn Z_machines_set_budget(argc: x.u4c, argv: [*c]x.ByondValue) callcon
 
     state.budget_percent = std.math.clamp(budget, 10, 80);
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
-pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
+pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     _ = argc;
     _ = argv;
 
@@ -2657,7 +2665,7 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) u64 {
 
     _state = null;
 
-    return @bitCast(x.True());
+    return returnCast(x.True());
 }
 
 comptime {
