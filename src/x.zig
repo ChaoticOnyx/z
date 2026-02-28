@@ -108,11 +108,6 @@ extern "kernel32" fn GetProcAddress(hModule: *anyopaque, lpProcName: [*:0]const 
 const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: u32 = 0x00000002;
 const BYONDCORE_DLL: [*:0]const u16 = std.unicode.utf8ToUtf16LeStringLiteral("byondcore.dll");
 
-const RTLD_LAZY: c_int = 0x1;
-const RTLD_NEXT: *anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
-extern "c" fn dlopen(path: ?[*:0]const u8, mode: c_int) ?*anyopaque;
-extern "c" fn dlsym(handle: *anyopaque, symbol: [*:0]const u8) ?*anyopaque;
-
 const Library = struct {
     handle: ?*anyopaque = null,
     table: ?Table = null,
@@ -129,7 +124,7 @@ const Library = struct {
         const ptr: ?*anyopaque = if (is_windows)
             GetProcAddress(handle, name.ptr)
         else
-            dlsym(handle, name.ptr);
+            std.c.dlsym(handle, name.ptr);
 
         return ptr;
     }
@@ -147,7 +142,15 @@ const Library = struct {
                     return null;
                 }
             } else {
-                this.handle = RTLD_NEXT;
+                this.handle = std.c.dlopen("libbyond.so", .{ .NOW = true, .NOLOAD = true });
+
+                if (this.handle == null) {
+                    if (std.c.dlerror()) |err| {
+                        std.log.err("dlopen failed: {s}", .{std.mem.span(err)});
+                    }
+
+                    return null;
+                }
             }
         }
 
