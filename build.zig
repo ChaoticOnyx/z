@@ -13,7 +13,8 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86,
         .os_tag = os,
-        .abi = if (os == .linux) .musl else .gnu,
+        .abi = .gnu,
+        .glibc_version = if (os == .linux) .{ .major = 2, .minor = 17, .patch = 0 } else null,
     });
 
     const ondatra = b.dependency("ondatra", .{
