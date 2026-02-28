@@ -973,7 +973,8 @@ const Machine = struct {
     }
 
     inline fn mmioRead(ctx: *anyopaque, address: u32) ?u8 {
-        const this: *Machine = @ptrCast(@alignCast(ctx));
+        const cpu: *Cpu = @ptrCast(@alignCast(ctx));
+        const this: *Machine = @fieldParentPtr("cpu", cpu);
 
         if (address >= sdk.Memory.BOOT_INFO and address < sdk.Memory.BOOT_INFO + @sizeOf(sdk.BootInfo)) {
             const offset = address - sdk.Memory.BOOT_INFO;
@@ -1087,7 +1088,8 @@ const Machine = struct {
     }
 
     inline fn mmioWrite(ctx: *anyopaque, address: u32, value: u8) bool {
-        const this: *Machine = @ptrCast(@alignCast(ctx));
+        const cpu: *Cpu = @ptrCast(@alignCast(ctx));
+        const this: *Machine = @fieldParentPtr("cpu", cpu);
 
         if (address >= sdk.Memory.CLINT and address < sdk.Memory.CLINT + @sizeOf(sdk.Clint)) {
             const offset = address - sdk.Memory.CLINT;
