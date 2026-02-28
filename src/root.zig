@@ -1909,8 +1909,6 @@ const State = struct {
     }
 
     pub inline fn deinit(this: *State) void {
-        std.log.info("deinit", .{});
-
         for (this.machines.items) |*machine| {
             machine.deinit(this.alloc.allocator());
         }
