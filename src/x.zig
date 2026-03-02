@@ -484,17 +484,24 @@ pub inline fn Byond_CRASH(str: [:0]const u8) void {
     table.Byond_CRASH(str);
 }
 
-pub inline fn Num(v: f32) ByondValue {
+pub inline fn NumF(v: f32) ByondValue {
     var value: ByondValue = .{};
     ByondValue_SetNum(&value, v);
 
     return value;
 }
 
+pub inline fn Num(v: u32) ByondValue {
+    var value: ByondValue = .{};
+    ByondValue_SetNum(&value, @floatFromInt(v));
+
+    return value;
+}
+
 pub inline fn True() ByondValue {
-    return Num(1.0);
+    return Num(1);
 }
 
 pub inline fn False() ByondValue {
-    return Num(0.0);
+    return Num(0);
 }

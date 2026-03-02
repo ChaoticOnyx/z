@@ -77,12 +77,30 @@ inline fn dmaFill(pattern: []const u8, dst: []u8) void {
     }
 }
 
+inline fn genericMmioRead(this: anytype, offset: usize, comptime T: type) ?u8 {
+    switch (offset) {
+        @offsetOf(T, "_config")...(@offsetOf(T, "_config") + @sizeOf(T.Config) - 1) => {
+            const rel_offset = offset - @offsetOf(T, "_config");
+            const bytes = std.mem.asBytes(&this.mmio._config);
+
+            return bytes[rel_offset];
+        },
+        @offsetOf(T, "_status")...(@offsetOf(T, "_status") + @sizeOf(T.Status) - 1) => {
+            const rel_offset = offset - @offsetOf(T, "_status");
+            const bytes = std.mem.asBytes(&this.mmio._status);
+
+            return bytes[rel_offset];
+        },
+        else => return null,
+    }
+}
+
 pub const Tts = struct {
     pub const NativeCommand = enum(u8) {
         say = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@floatFromInt(@intFromEnum(this)));
+            return x.Num(@intFromEnum(this));
         }
     };
 
@@ -104,21 +122,7 @@ pub const Tts = struct {
         _ = slot;
         _ = machine;
 
-        switch (offset) {
-            @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
-                const bytes = std.mem.asBytes(&this.mmio._config);
-
-                return bytes[rel_offset];
-            },
-            @offsetOf(sdk.Tts, "_status")...(@offsetOf(sdk.Tts, "_status") + @sizeOf(sdk.Tts.Status) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Tts, "_status");
-                const bytes = std.mem.asBytes(&this.mmio._status);
-
-                return bytes[rel_offset];
-            },
-            else => return null,
-        }
+        return genericMmioRead(this, offset, sdk.Tts);
     }
 
     pub inline fn mmioWrite(this: *Tts, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -154,7 +158,7 @@ pub const Tts = struct {
                         var byond_msg: x.ByondValue = .{};
                         x.ByondValue_SetStr(&byond_msg, msg);
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.say.byond(), byond_msg });
+                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.say.byond(), byond_msg });
                     },
                     @offsetOf(sdk.Tts.Action, "ack") => {
                         this.mmio._status.last_event = .{};
@@ -248,7 +252,7 @@ pub const SerialTerminal = struct {
         write = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@floatFromInt(@intFromEnum(this)));
+            return x.Num(@intFromEnum(this));
         }
     };
 
@@ -284,21 +288,7 @@ pub const SerialTerminal = struct {
         _ = slot;
         _ = machine;
 
-        switch (offset) {
-            @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
-                const bytes = std.mem.asBytes(&this.mmio._config);
-
-                return bytes[rel_offset];
-            },
-            @offsetOf(sdk.SerialTerminal, "_status")...(@offsetOf(sdk.SerialTerminal, "_status") + @sizeOf(sdk.SerialTerminal.Status) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_status");
-                const bytes = std.mem.asBytes(&this.mmio._status);
-
-                return bytes[rel_offset];
-            },
-            else => return null,
-        }
+        return genericMmioRead(this, offset, sdk.SerialTerminal);
     }
 
     pub inline fn mmioWrite(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -308,6 +298,7 @@ pub const SerialTerminal = struct {
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
                 bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
 
                 return true;
             },
@@ -332,15 +323,12 @@ pub const SerialTerminal = struct {
                         }
 
                         for (0..len) |idx| {
-                            const byond_value = x.Num(@floatFromInt(this.output[idx]));
-                            const byond_idx = x.Num(@floatFromInt(idx + 1));
-
-                            if (!x.Byond_WriteListIndex(&byond_bytes, &byond_idx, &byond_value)) {
+                            if (!x.Byond_WriteListIndex(&byond_bytes, &x.Num(idx + 1), &x.Num(this.output[idx]))) {
                                 std.log.err("Failed to write an output byte from Serial Terminal at {}", .{idx});
                             }
                         }
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.write.byond(), byond_bytes });
+                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.write.byond(), byond_bytes });
                     },
                     @offsetOf(sdk.SerialTerminal.Action, "ack") => {
                         this.mmio._status.last_event = .{};
@@ -431,10 +419,9 @@ pub const SerialTerminal = struct {
                 bytes_len = std.math.clamp(bytes_len, 0, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
 
                 for (0..bytes_len) |i| {
-                    const byond_idx = x.Num(@floatFromInt(i + 1));
                     var byond_byte: x.ByondValue = .{};
 
-                    if (!x.Byond_ReadListIndex(bytes, &byond_idx, &byond_byte)) {
+                    if (!x.Byond_ReadListIndex(bytes, &x.Num(i + 1), &byond_byte)) {
                         this.input[i] = 0;
                         bytes_len = i;
 
@@ -487,7 +474,7 @@ pub const Signaler = struct {
         send = 2,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@floatFromInt(@intFromEnum(this)));
+            return x.Num(@intFromEnum(this));
         }
     };
 
@@ -509,21 +496,7 @@ pub const Signaler = struct {
         _ = slot;
         _ = machine;
 
-        switch (offset) {
-            @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
-                const bytes = std.mem.asBytes(&this.mmio._config);
-
-                return bytes[rel_offset];
-            },
-            @offsetOf(sdk.Signaler, "_status")...(@offsetOf(sdk.Signaler, "_status") + @sizeOf(sdk.Signaler.Status) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Signaler, "_status");
-                const bytes = std.mem.asBytes(&this.mmio._status);
-
-                return bytes[rel_offset];
-            },
-            else => return null,
-        }
+        return genericMmioRead(this, offset, sdk.Signaler);
     }
 
     pub inline fn mmioWrite(this: *Signaler, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -533,6 +506,7 @@ pub const Signaler = struct {
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
                 bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
 
                 return true;
             },
@@ -546,10 +520,10 @@ pub const Signaler = struct {
                         }
 
                         return machine.tryCallSyscallProc(&.{
-                            x.Num(@floatFromInt(slot)),
+                            x.Num(slot),
                             NativeCommand.set.byond(),
-                            x.Num(@floatFromInt(this.mmio._config.frequency)),
-                            x.Num(@floatFromInt(this.mmio._config.code)),
+                            x.Num(this.mmio._config.frequency),
+                            x.Num(this.mmio._config.code),
                         });
                     },
                     @offsetOf(sdk.Signaler.Action, "send") => {
@@ -557,7 +531,7 @@ pub const Signaler = struct {
                             return false;
                         }
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(@floatFromInt(slot)), NativeCommand.send.byond() });
+                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.send.byond() });
                     },
                     @offsetOf(sdk.Signaler.Action, "ack") => {
                         this.mmio._status.last_event = .{ .ty = .none };
@@ -663,7 +637,7 @@ pub const Light = struct {
         set = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@floatFromInt(@intFromEnum(this)));
+            return x.Num(@intFromEnum(this));
         }
     };
 
@@ -684,21 +658,7 @@ pub const Light = struct {
         _ = slot;
         _ = machine;
 
-        switch (offset) {
-            @offsetOf(sdk.Light, "_config")...(@offsetOf(sdk.Light, "_config") + @sizeOf(sdk.Light.Config) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Light, "_config");
-                const bytes = std.mem.asBytes(&this.mmio._config);
-
-                return bytes[rel_offset];
-            },
-            @offsetOf(sdk.Light, "_status")...(@offsetOf(sdk.Light, "_status") + @sizeOf(sdk.Light.Status) - 1) => {
-                const rel_offset = offset - @offsetOf(sdk.Light, "_status");
-                const bytes = std.mem.asBytes(&this.mmio._status);
-
-                return bytes[rel_offset];
-            },
-            else => return null,
-        }
+        return genericMmioRead(this, offset, sdk.Light);
     }
 
     pub inline fn mmioWrite(this: *Light, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -731,10 +691,10 @@ pub const Light = struct {
                         x.ByondValue_SetStr(&byond_hex, &hex_buffer);
 
                         return machine.tryCallSyscallProc(&.{
-                            x.Num(@floatFromInt(slot)),
+                            x.Num(slot),
                             NativeCommand.set.byond(),
                             byond_hex,
-                            x.Num(@floatFromInt(this.mmio._config.brightness)),
+                            x.Num(this.mmio._config.brightness),
                         });
                     },
                     @offsetOf(sdk.Light.Action, "ack") => {
@@ -789,6 +749,254 @@ pub const Light = struct {
     }
 };
 
+pub const EnvSensor = struct {
+    pub const NativeCommand = enum(u8) {
+        update = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.Num(@intFromEnum(this));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        ready_status = 1,
+        update = 2,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.EnvSensor = .{},
+
+    pub inline fn mmioRead(this: *EnvSensor, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        return genericMmioRead(this, offset, sdk.EnvSensor);
+    }
+
+    pub inline fn mmioWrite(this: *EnvSensor, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.EnvSensor, "_config")...(@offsetOf(sdk.EnvSensor, "_config") + @sizeOf(sdk.EnvSensor.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.EnvSensor, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.EnvSensor, "_action")...(@offsetOf(sdk.EnvSensor, "_action") + @sizeOf(sdk.EnvSensor.Action) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.EnvSensor, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.EnvSensor.Action, "update") => {
+                        if (!this.mmio._status.ready) {
+                            return false;
+                        }
+
+                        return machine.tryCallSyscallProc(&.{
+                            x.Num(slot),
+                            NativeCommand.update.byond(),
+                            if (this.mmio._config.rays.alpha) x.True() else x.False(),
+                            if (this.mmio._config.rays.beta) x.True() else x.False(),
+                            if (this.mmio._config.rays.hawking) x.True() else x.False(),
+                        });
+                    },
+                    @offsetOf(sdk.EnvSensor.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub inline fn syscall(this: *EnvSensor, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .update => {
+                if (args.len != 3) {
+                    return x.False();
+                }
+
+                const byond_atmos = &args[1];
+                const byond_radiation = &args[2];
+
+                if (!x.ByondValue_IsList(byond_atmos)) {
+                    return x.False();
+                }
+
+                if (!x.ByondValue_IsList(byond_radiation)) {
+                    return x.False();
+                }
+
+                // Atmos
+                {
+                    var cursor: usize = 1;
+
+                    var byond_total_moles: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_total_moles)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.total_moles = @intFromFloat(x.ByondValue_GetNum(&byond_total_moles));
+
+                    var byond_pressure: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_pressure)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.pressure = @intFromFloat(x.ByondValue_GetNum(&byond_pressure));
+
+                    var byond_temperature: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_temperature)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.temperature = @intFromFloat(x.ByondValue_GetNum(&byond_temperature));
+
+                    var byond_oxygen: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_oxygen)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.oxygen = @intFromFloat(x.ByondValue_GetNum(&byond_oxygen));
+
+                    var byond_nitrogen: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_nitrogen)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.nitrogen = @intFromFloat(x.ByondValue_GetNum(&byond_nitrogen));
+
+                    var byond_carbon_dioxide: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_carbon_dioxide)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.carbon_dioxide = @intFromFloat(x.ByondValue_GetNum(&byond_carbon_dioxide));
+
+                    var byond_hydrogen: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_hydrogen)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.hydrogen = @intFromFloat(x.ByondValue_GetNum(&byond_hydrogen));
+
+                    var byond_plasma: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_plasma)) {
+                        std.log.err("Failed to read atmos list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.atmos.plasma = @intFromFloat(x.ByondValue_GetNum(&byond_plasma));
+                }
+
+                // Radiation
+                {
+                    var cursor: usize = 1;
+
+                    var byond_avg_activity: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_avg_activity)) {
+                        std.log.err("Failed to read radiation list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.radiation.avg_activity = @intFromFloat(x.ByondValue_GetNum(&byond_avg_activity));
+
+                    var byond_avg_energy: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_avg_energy)) {
+                        std.log.err("Failed to read radiation list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.radiation.avg_energy = @intFromFloat(x.ByondValue_GetNum(&byond_avg_energy));
+
+                    var byond_dose: x.ByondValue = .{};
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_dose)) {
+                        std.log.err("Failed to read radiation list at index {}", .{cursor});
+
+                        return x.False();
+                    }
+
+                    cursor += 1;
+                    this.mmio._status.radiation.dose = @intFromFloat(x.ByondValue_GetNum(&byond_dose));
+                }
+
+                return x.True();
+            },
+            .ready_status => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
+
+                if (this.mmio._status.ready) {
+                    this.mmio._status.last_event = .{ .ty = .ready };
+                }
+
+                machine.updateExternalInterrupts();
+
+                return x.True();
+            },
+            else => return x.False(),
+        }
+    }
+
+    pub inline fn isInterruptPending(this: *EnvSensor, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
+            return true;
+        }
+
+        return false;
+    }
+};
+
 pub const Device = union(enum) {
     none,
     tts: Tts,
@@ -796,6 +1004,7 @@ pub const Device = union(enum) {
     signaler: Signaler,
     gps: Gps,
     light: Light,
+    env_sensor: EnvSensor,
 
     pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
         return switch (this.*) {
@@ -805,6 +1014,7 @@ pub const Device = union(enum) {
             .signaler => return this.signaler.mmioRead(slot, machine, offset),
             .gps => return this.gps.mmioRead(slot, machine, offset),
             .light => return this.light.mmioRead(slot, machine, offset),
+            .env_sensor => return this.env_sensor.mmioRead(slot, machine, offset),
         };
     }
 
@@ -815,12 +1025,13 @@ pub const Device = union(enum) {
             .serial_terminal => return this.serial_terminal.mmioWrite(slot, machine, offset, value),
             .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
             .light => return this.light.mmioWrite(slot, machine, offset, value),
+            .env_sensor => return this.env_sensor.mmioWrite(slot, machine, offset, value),
         };
     }
 
     pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         return switch (this.*) {
-            .none, .signaler, .gps, .light => return false,
+            .none, .signaler, .gps, .light, .env_sensor => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
         };
@@ -833,6 +1044,7 @@ pub const Device = union(enum) {
             .serial_terminal => return this.serial_terminal.syscall(slot, machine, args),
             .signaler => return this.signaler.syscall(slot, machine, args),
             .light => return this.light.syscall(slot, machine, args),
+            .env_sensor => return this.env_sensor.syscall(slot, machine, args),
         };
     }
 
@@ -843,6 +1055,7 @@ pub const Device = union(enum) {
             .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
             .signaler => return this.signaler.isInterruptPending(slot, machine),
             .light => return this.light.isInterruptPending(slot, machine),
+            .env_sensor => return this.env_sensor.isInterruptPending(slot, machine),
         };
     }
 
@@ -854,6 +1067,7 @@ pub const Device = union(enum) {
             .signaler => return @sizeOf(sdk.Signaler),
             .gps => return @sizeOf(sdk.Gps),
             .light => return @sizeOf(sdk.Light),
+            .env_sensor => return @sizeOf(sdk.EnvSensor),
         };
     }
 
@@ -865,12 +1079,13 @@ pub const Device = union(enum) {
             .signaler => .signaler,
             .gps => .gps,
             .light => .light,
+            .env_sensor => .env_sensor,
         };
     }
 
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
-            .none, .tts, .signaler, .gps, .light => {},
+            .none, .tts, .signaler, .gps, .light, .env_sensor => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
         }
     }
@@ -979,7 +1194,7 @@ const Machine = struct {
         const proc = this.post_tick_proc orelse return;
 
         var ret: x.ByondValue = .{};
-        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{x.Num(@floatFromInt(delta_us))}, &ret);
+        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{x.Num(delta_us)}, &ret);
     }
 
     pub inline fn tryCallTrapProc(this: *const Machine) void {
@@ -1664,10 +1879,7 @@ const State = struct {
         }
 
         for (0..len) |idx| {
-            const value = x.Num(@floatFromInt(machine.cpu.ram[address + idx]));
-            const byond_idx = x.Num(@floatFromInt(idx + 1));
-
-            if (!x.Byond_WriteListIndex(dst, &byond_idx, &value)) {
+            if (!x.Byond_WriteListIndex(dst, &x.Num(idx + 1), &x.Num(machine.cpu.ram[address + idx]))) {
                 this.last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
@@ -1698,10 +1910,9 @@ const State = struct {
         }
 
         for (0..len) |idx| {
-            const byond_idx = x.Num(@floatFromInt(idx + 1));
             var byond_value: x.ByondValue = .{};
 
-            if (!x.Byond_ReadListIndex(src, &byond_idx, &byond_value)) {
+            if (!x.Byond_ReadListIndex(src, &x.Num(idx + 1), &byond_value)) {
                 this.last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
@@ -1918,6 +2129,7 @@ const State = struct {
             .signaler => .{ .signaler = .{} },
             .gps => .{ .gps = .{} },
             .light => .{ .light = .{} },
+            .env_sensor => .{ .env_sensor = .{} },
         };
 
         return machine.tryAttachPci(device);
@@ -2194,7 +2406,7 @@ pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c)
         return returnCast(.{});
     };
 
-    return returnCast(x.Num(@floatFromInt(id)));
+    return returnCast(x.Num(id));
 }
 
 pub export fn Z_machine_reset(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2252,7 +2464,7 @@ pub export fn Z_machine_get_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callco
         return returnCast(.{});
     };
 
-    return returnCast(x.Num(@floatFromInt(size)));
+    return returnCast(x.Num(size));
 }
 
 pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2272,7 +2484,7 @@ pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callc
         return returnCast(.{});
     };
 
-    return returnCast(x.Num(@floatFromInt(value)));
+    return returnCast(x.Num(value));
 }
 
 pub export fn Z_machine_write_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2406,7 +2618,7 @@ pub export fn Z_machine_get_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(
         return returnCast(x.False());
     };
 
-    return returnCast(x.Num(@floatFromInt(@intFromEnum(machine_state))));
+    return returnCast(x.Num(@intFromEnum(machine_state)));
 }
 
 pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2425,7 +2637,7 @@ pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) cal
         return returnCast(x.False());
     };
 
-    return returnCast(x.Num(utilization));
+    return returnCast(x.NumF(utilization));
 }
 
 pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2445,7 +2657,7 @@ pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callco
     };
     const executed_32: u32 = @truncate(executed);
 
-    return returnCast(x.Num(@floatFromInt(executed_32)));
+    return returnCast(x.Num(executed_32));
 }
 
 pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
@@ -2698,7 +2910,7 @@ pub export fn Z_machine_try_attach_pci(argc: x.u4c, argv: [*c]x.ByondValue) call
         return returnCast(.{});
     }
 
-    return returnCast(x.Num(@floatFromInt(pci_slot.?)));
+    return returnCast(x.Num(pci_slot.?));
 }
 
 pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {

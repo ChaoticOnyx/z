@@ -4,6 +4,7 @@
 const std = @import("std");
 
 const FILE_NAME = "z.log";
+const MAX_SIZE = std.math.pow(usize, 2, 20);
 
 pub const Level = enum {
     debug,
@@ -16,6 +17,11 @@ pub const Level = enum {
 pub inline fn getWriter(buffer: []u8) !std.fs.File.Writer {
     var file = try std.fs.cwd().createFile(FILE_NAME, .{ .truncate = false });
     errdefer file.close();
+
+    if (file.getEndPos() catch 0 > MAX_SIZE) {
+        file.close();
+        file = try std.fs.cwd().createFile(FILE_NAME, .{ .truncate = true });
+    }
 
     var writer = file.writer(buffer);
     try writer.seekTo(try file.getEndPos());
