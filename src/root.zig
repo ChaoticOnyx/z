@@ -751,9 +751,10 @@ const Machine = struct {
     });
 
     id: Id,
+    cpu: Cpu,
+    src: x.ByondValue,
     state: Machine.State = .stopped,
     frequency: u32 = DEFAULT_FREQUENCY,
-    cpu: Cpu,
     utilization: f32 = 0.0,
     executed: u64 = 0,
     idle_executed: u64 = 0,
@@ -761,7 +762,6 @@ const Machine = struct {
     debt: u64 = 0,
     prng: std.Random.DefaultPrng,
     dma: sdk.Dma = .{},
-    src_object: ?x.ByondValue = null,
     post_tick_proc: ?u32 = null,
     trap_proc: ?u32 = null,
     syscall_proc: ?u32 = null,
@@ -769,7 +769,7 @@ const Machine = struct {
     pci: Pci = .{},
     sensors: sdk.Sensors = .{},
 
-    pub inline fn init(id: Machine.Id) Machine {
+    pub inline fn init(id: Machine.Id, src: x.ByondValue) Machine {
         const ram: []u8 = &.{};
 
         var prng_seed: u64 = 0;
@@ -779,6 +779,7 @@ const Machine = struct {
             .id = id,
             .cpu = .init(ram),
             .prng = .init(prng_seed),
+            .src = src,
         };
     }
 
@@ -786,9 +787,9 @@ const Machine = struct {
         allocator.free(this.cpu.ram);
         this.cpu.ram = &.{};
 
-        if (this.src_object != null) {
-            x.ByondValue_DecRef(&this.src_object.?);
-            this.src_object = null;
+        if (x.ByondValue_IsNull(&this.src)) {
+            x.ByondValue_DecRef(&this.src);
+            this.src = .{};
         }
 
         this.post_tick_proc = null;
@@ -811,27 +812,24 @@ const Machine = struct {
     }
 
     pub inline fn tryCallPostTickProc(this: *const Machine, delta_us: u32) void {
-        const src = this.src_object orelse return;
         const proc = this.post_tick_proc orelse return;
 
         var ret: x.ByondValue = .{};
-        _ = x.Byond_CallProcByStrId(&src, proc, &.{x.Num(@floatFromInt(delta_us))}, &ret);
+        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{x.Num(@floatFromInt(delta_us))}, &ret);
     }
 
     pub inline fn tryCallTrapProc(this: *const Machine) void {
-        const src = this.src_object orelse return;
         const proc = this.trap_proc orelse return;
 
         var ret: x.ByondValue = .{};
-        _ = x.Byond_CallProcByStrId(&src, proc, &.{}, &ret);
+        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{}, &ret);
     }
 
     pub inline fn tryCallSyscallProc(this: *const Machine, args: []const x.ByondValue) bool {
-        const src = this.src_object orelse return false;
         const proc = this.syscall_proc orelse return false;
 
         var ret: x.ByondValue = .{};
-        if (!x.Byond_CallProcByStrId(&src, proc, args, &ret)) {
+        if (!x.Byond_CallProcByStrId(&this.src, proc, args, &ret)) {
             return false;
         }
 
@@ -1267,6 +1265,7 @@ const Machine = struct {
 pub const MachineCreationError = error{
     OutOfId,
     OutOfMemory,
+    BadSrc,
 };
 
 pub const MachineResetError = error{
@@ -1363,8 +1362,6 @@ const State = struct {
     pub const Stats = struct {
         last_wall_us: u64 = 0,
         last_budget_us: u64 = 0,
-        last_machines_served: u32 = 0,
-        last_machines_starved: u32 = 0,
         load_avg: f32 = 0.0,
     };
 
@@ -1376,14 +1373,20 @@ const State = struct {
     stats: Stats = .{},
     last_error: ?[:0]const u8 = null,
 
-    pub inline fn machineCreate(this: *State) MachineCreationError!Machine.Id {
+    pub inline fn machineCreate(this: *State, src: x.ByondValue) MachineCreationError!Machine.Id {
+        if (x.ByondValue_IsNull(&src)) {
+            this.last_error = @errorName(MachineCreationError.BadSrc);
+
+            return MachineCreationError.BadSrc;
+        }
+
         if (this.next_id == std.math.maxInt(Machine.Id)) {
             this.last_error = @errorName(MachineCreationError.OutOfId);
 
             return MachineCreationError.OutOfId;
         }
 
-        const machine: Machine = .init(this.next_id);
+        const machine: Machine = .init(this.next_id, src);
 
         this.machines.append(this.alloc.allocator(), machine) catch {
             this.last_error = @errorName(MachineCreationError.OutOfMemory);
@@ -1404,24 +1407,6 @@ const State = struct {
 
         @memset(machine.cpu.ram, 0);
         machine.cpu.registers = .{};
-    }
-
-    pub inline fn machineConnect(this: *State, id: Machine.Id, src_object: ?x.ByondValue) MachineConnectError!void {
-        const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineConnectError.MachineNotFound);
-
-            return MachineConnectError.MachineNotFound;
-        };
-
-        if (machine.src_object != null) {
-            x.ByondValue_DecRef(&machine.src_object.?);
-            machine.src_object = null;
-        }
-
-        if (src_object != null) {
-            x.ByondValue_IncRef(&src_object.?);
-            machine.src_object = src_object;
-        }
     }
 
     pub inline fn machineSetRamSize(this: *State, id: Machine.Id, ram_size: u32) MachineSetRamSizeError!void {
@@ -2008,16 +1993,16 @@ pub export fn Z_get_last_error(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c)
 }
 
 pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
-    _ = argv;
+    const args = argv[0..argc];
 
-    if (argc != 0) {
-        x.Byond_CRASH("Z_machine_create does not accept args");
+    if (args.len != 1) {
+        x.Byond_CRASH("Z_machine_create requires 1 argument");
 
         return returnCast(.{});
     }
 
     const state = getState();
-    const id = state.machineCreate() catch {
+    const id = state.machineCreate(args[0]) catch {
         return returnCast(.{});
     };
 
@@ -2037,26 +2022,6 @@ pub export fn Z_machine_reset(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) 
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     state.machineReset(id) catch {
-        return returnCast(x.False());
-    };
-
-    return returnCast(x.True());
-}
-
-pub export fn Z_machine_connect(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
-    const args = argv[0..argc];
-
-    if (args.len != 2) {
-        x.Byond_CRASH("Z_macine_connect requires 2 arguments");
-
-        return returnCast(.{});
-    }
-
-    const state = getState();
-    const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
-    const src_object = &args[1];
-
-    state.machineConnect(id, if (x.ByondValue_IsNull(src_object)) null else src_object.*) catch {
         return returnCast(x.False());
     };
 

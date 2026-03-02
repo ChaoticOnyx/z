@@ -26,6 +26,7 @@ var/__z_name = null
 #define Z_ERROR_BAD_ELF "BadElf"
 #define Z_ERROR_BAD_STATE "BadState"
 #define Z_ERROR_SLOT_NOT_FOUND "SlotNotFound"
+#define Z_ERROR_BAD_SRC "BadSrc"
 #define Z_ERROR_UNKNOWN "Unknown"
 
 #define Z_MSTATE_STOPPED (1)
@@ -55,16 +56,12 @@ var/__z_name = null
 
 /// Creates a new machine. Returns numeric machine ID.
 /// Machine starts with no RAM and default frequency (1 MHz), not yet runnable.
-#define Z_MACHINE_CREATE(...) call_ext(__z_name, "byond:Z_machine_create")()
+#define Z_MACHINE_CREATE(SRC) call_ext(__z_name, "byond:Z_machine_create")(SRC)
 
 /// Resets a machine: zeroes all CPU registers and clears RAM contents.
 /// Frequency, RAM size, and connected BYOND object are preserved.
 /// ELF must be reloaded after reset.
 #define Z_MACHINE_RESET(ID) call_ext(__z_name, "byond:Z_machine_reset")(ID)
-
-/// Binds a machine to a BYOND object for MMIO callbacks (mmio_read/mmio_write).
-/// Pass null as OBJ to disconnect.
-#define Z_MACHINE_CONNECT(ID, OBJ) call_ext(__z_name, "byond:Z_machine_connect")(ID, OBJ)
 
 /// Allocates RAM for a machine in bytes. Frees previous RAM.
 /// Machine is not runnable until RAM is set and ELF is loaded.
