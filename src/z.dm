@@ -38,6 +38,7 @@ var/__z_name = null
 #define Z_DEVICE_TYPE_SERIAL_TERMINAL 2
 #define Z_DEVICE_TYPE_SIGNALER 3
 #define Z_DEVICE_TYPE_GPS 4
+#define Z_DEVICE_TYPE_LIGHT 5
 
 #define Z_TTS_N2B_CMD_SAY 1
 #define Z_TTS_B2N_CMD_READY_STATUS 1
@@ -49,6 +50,9 @@ var/__z_name = null
 #define Z_SIGNALER_N2B_CMD_SEND 2
 #define Z_SIGNALER_B2N_CMD_PULSE 1
 #define Z_SIGNALER_B2N_CMD_READY_STATUS 2
+
+#define Z_LIGHT_N2B_CMD_SET 1
+#define Z_LIGHT_B2N_CMD_READY_STATUS 1
 
 // All machine IDs are numeric handles returned by Z_MACHINE_CREATE.
 

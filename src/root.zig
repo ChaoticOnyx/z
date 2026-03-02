@@ -137,7 +137,7 @@ pub const Tts = struct {
 
                 switch (rel_offset) {
                     @offsetOf(sdk.Tts.Action, "execute") => {
-                        if (!this.mmio._status.is_ready) {
+                        if (!this.mmio._status.ready) {
                             return false;
                         }
 
@@ -217,24 +217,25 @@ pub const Tts = struct {
                     return x.False();
                 }
 
-                this.mmio._status.is_ready = x.ByondValue_IsTrue(&args[1]);
+                this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
 
-                if (this.mmio._status.is_ready) {
+                if (this.mmio._status.ready) {
                     this.mmio._status.last_event = .{ .ty = .ready };
-                    machine.updateExternalInterrupts();
                 }
+
+                machine.updateExternalInterrupts();
+
+                return x.True();
             },
             _ => return x.False(),
         }
-
-        return x.True();
     }
 
     pub inline fn isInterruptPending(this: *Tts, slot: u8, machine: *Machine) bool {
         _ = slot;
         _ = machine;
 
-        if (this.mmio._config.interrupt_when_ready and this.mmio._status.last_event.ty == .ready) {
+        if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
             return true;
         }
 
@@ -600,15 +601,14 @@ pub const Signaler = struct {
 
                 if (this.mmio._status.ready) {
                     this.mmio._status.last_event = .{ .ty = .ready };
-                    machine.updateExternalInterrupts();
                 }
+
+                machine.updateExternalInterrupts();
 
                 return x.True();
             },
             else => return x.False(),
         }
-
-        return x.False();
     }
 
     pub inline fn isInterruptPending(this: *Signaler, slot: u8, machine: *Machine) bool {
@@ -658,12 +658,144 @@ pub const Gps = struct {
     }
 };
 
+pub const Light = struct {
+    pub const NativeCommand = enum(u8) {
+        set = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.Num(@floatFromInt(@intFromEnum(this)));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        ready_status = 1,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.Light = .{},
+
+    pub inline fn mmioRead(this: *Light, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        switch (offset) {
+            @offsetOf(sdk.Light, "_config")...(@offsetOf(sdk.Light, "_config") + @sizeOf(sdk.Light.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Light, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                return bytes[rel_offset];
+            },
+            @offsetOf(sdk.Light, "_status")...(@offsetOf(sdk.Light, "_status") + @sizeOf(sdk.Light.Status) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Light, "_status");
+                const bytes = std.mem.asBytes(&this.mmio._status);
+
+                return bytes[rel_offset];
+            },
+            else => return null,
+        }
+    }
+
+    pub inline fn mmioWrite(this: *Light, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.Light, "_config")...(@offsetOf(sdk.Light, "_config") + @sizeOf(sdk.Light.Config) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Light, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.Light, "_action")...(@offsetOf(sdk.Light, "_action") + @sizeOf(sdk.Light.Action) - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Light, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Light.Action, "set") => {
+                        if (!this.mmio._status.ready) {
+                            return false;
+                        }
+
+                        const color = this.mmio._config.color;
+                        var hex_buffer: [7:0]u8 = undefined;
+                        var writer: std.Io.Writer = .fixed(&hex_buffer);
+
+                        writer.print("#{x:0>2}{x:0>2}{x:0>2}", .{ color.r, color.g, color.b }) catch unreachable;
+
+                        var byond_hex: x.ByondValue = .{};
+                        x.ByondValue_SetStr(&byond_hex, &hex_buffer);
+
+                        return machine.tryCallSyscallProc(&.{
+                            x.Num(@floatFromInt(slot)),
+                            NativeCommand.set.byond(),
+                            byond_hex,
+                            x.Num(@floatFromInt(this.mmio._config.brightness)),
+                        });
+                    },
+                    @offsetOf(sdk.Light.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub inline fn syscall(this: *Light, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .ready_status => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
+
+                if (this.mmio._status.ready) {
+                    this.mmio._status.last_event = .{ .ty = .ready };
+                }
+
+                machine.updateExternalInterrupts();
+
+                return x.True();
+            },
+            else => return .{},
+        }
+    }
+
+    pub inline fn isInterruptPending(this: *Light, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
+            return true;
+        }
+
+        return false;
+    }
+};
+
 pub const Device = union(enum) {
     none,
     tts: Tts,
     serial_terminal: SerialTerminal,
     signaler: Signaler,
     gps: Gps,
+    light: Light,
 
     pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
         return switch (this.*) {
@@ -672,6 +804,7 @@ pub const Device = union(enum) {
             .serial_terminal => return this.serial_terminal.mmioRead(slot, machine, offset),
             .signaler => return this.signaler.mmioRead(slot, machine, offset),
             .gps => return this.gps.mmioRead(slot, machine, offset),
+            .light => return this.light.mmioRead(slot, machine, offset),
         };
     }
 
@@ -681,12 +814,13 @@ pub const Device = union(enum) {
             .tts => return this.tts.mmioWrite(slot, machine, offset, value),
             .serial_terminal => return this.serial_terminal.mmioWrite(slot, machine, offset, value),
             .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
+            .light => return this.light.mmioWrite(slot, machine, offset, value),
         };
     }
 
     pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         return switch (this.*) {
-            .none, .signaler, .gps => return false,
+            .none, .signaler, .gps, .light => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
         };
@@ -698,6 +832,7 @@ pub const Device = union(enum) {
             .tts => return this.tts.syscall(slot, machine, args),
             .serial_terminal => return this.serial_terminal.syscall(slot, machine, args),
             .signaler => return this.signaler.syscall(slot, machine, args),
+            .light => return this.light.syscall(slot, machine, args),
         };
     }
 
@@ -707,6 +842,7 @@ pub const Device = union(enum) {
             .tts => return this.tts.isInterruptPending(slot, machine),
             .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
             .signaler => return this.signaler.isInterruptPending(slot, machine),
+            .light => return this.light.isInterruptPending(slot, machine),
         };
     }
 
@@ -717,6 +853,7 @@ pub const Device = union(enum) {
             .serial_terminal => return @sizeOf(sdk.SerialTerminal),
             .signaler => return @sizeOf(sdk.Signaler),
             .gps => return @sizeOf(sdk.Gps),
+            .light => return @sizeOf(sdk.Light),
         };
     }
 
@@ -727,12 +864,13 @@ pub const Device = union(enum) {
             .serial_terminal => .serial_terminal,
             .signaler => .signaler,
             .gps => .gps,
+            .light => .light,
         };
     }
 
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
-            .none, .tts, .signaler, .gps => {},
+            .none, .tts, .signaler, .gps, .light => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
         }
     }
@@ -1756,6 +1894,7 @@ const State = struct {
             },
             .signaler => .{ .signaler = .{} },
             .gps => .{ .gps = .{} },
+            .light => .{ .light = .{} },
         };
 
         return machine.tryAttachPci(device);
