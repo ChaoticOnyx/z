@@ -931,6 +931,7 @@ const Machine = struct {
     free_ram_start: u32 = 0,
     pci: Pci = .{},
     sensors: sdk.Sensors = .{},
+    power: sdk.Power = .{},
 
     pub inline fn init(id: Machine.Id, src: x.ByondValue) Machine {
         const ram: []u8 = &.{};
@@ -1149,6 +1150,11 @@ const Machine = struct {
         } else if (address >= sdk.Memory.SENSORS and address < sdk.Memory.SENSORS + @sizeOf(sdk.Sensors)) {
             const offset = address - sdk.Memory.SENSORS;
             const bytes = std.mem.asBytes(&this.sensors);
+
+            return bytes[offset];
+        } else if (address >= sdk.Memory.POWER and address < sdk.Memory.POWER + @sizeOf(sdk.Power)) {
+            const offset = address - sdk.Memory.POWER;
+            const bytes = std.mem.asBytes(&this.power);
 
             return bytes[offset];
         } else if (address >= sdk.Memory.CLINT and address < sdk.Memory.CLINT + @sizeOf(sdk.Clint)) {
@@ -1483,6 +1489,10 @@ pub const MachineSetSensorsError = error{
     MachineNotFound,
 };
 
+pub const MachineSetPowerError = error{
+    MachineNotFound,
+};
+
 pub const MachineSetProcError = error{
     MachineNotFound,
 };
@@ -1771,6 +1781,19 @@ const State = struct {
                 .overheat = overheat,
                 .throttled = throttled,
             },
+        };
+    }
+
+    pub inline fn machineSetPower(this: *State, id: Machine.Id, battery_charge: u32, has_external_source: bool) MachineSetPowerError!void {
+        const machine = this.findMachine(id) orelse {
+            this.last_error = @errorName(MachineSetPowerError.MachineNotFound);
+
+            return MachineSetPowerError.MachineNotFound;
+        };
+
+        machine.power = .{
+            .battery_charge = battery_charge,
+            .has_external_source = has_external_source,
         };
     }
 
@@ -2442,6 +2465,27 @@ pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callcon
     const throttled = x.ByondValue_IsTrue(&args[4]);
 
     state.machineSetSensors(id, @truncate(temperature), @truncate(power_usage), overheat, throttled) catch {
+        return returnCast(x.False());
+    };
+
+    return returnCast(x.True());
+}
+
+pub export fn Z_machine_set_power(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
+    const args = argv[0..argc];
+
+    if (args.len != 3) {
+        x.Byond_CRASH("Z_machine_set_power requires 2 arguments");
+
+        return returnCast(.{});
+    }
+
+    const state = getState();
+    const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
+    const battery_charge: u32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
+    const has_external_source = x.ByondValue_IsTrue(&args[2]);
+
+    state.machineSetPower(id, battery_charge, has_external_source) catch {
         return returnCast(x.False());
     };
 
