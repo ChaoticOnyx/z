@@ -37,6 +37,7 @@ var/__z_name = null
 #define Z_DEVICE_TYPE_TTS 1
 #define Z_DEVICE_TYPE_SERIAL_TERMINAL 2
 #define Z_DEVICE_TYPE_SIGNALER 3
+#define Z_DEVICE_TYPE_GPS 4
 
 #define Z_TTS_N2B_CMD_SAY 1
 #define Z_TTS_B2N_CMD_READY_STATUS 1

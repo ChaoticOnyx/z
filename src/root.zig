@@ -573,15 +573,6 @@ pub const Signaler = struct {
         return false;
     }
 
-    pub inline fn executeDma(this: *Signaler, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
-        _ = this;
-        _ = slot;
-        _ = machine;
-        _ = cfg;
-
-        return false;
-    }
-
     pub inline fn syscall(this: *Signaler, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
         _ = slot;
 
@@ -636,11 +627,43 @@ pub const Signaler = struct {
     }
 };
 
+pub const Gps = struct {
+    pub inline fn mmioRead(this: *Gps, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = this;
+        _ = slot;
+
+        switch (offset) {
+            @offsetOf(sdk.Gps, "_status")...(@offsetOf(sdk.Gps, "_status") + @sizeOf(sdk.Gps) - 1) => {
+                machine.idle_executed += 100;
+
+                const rel_offset = offset - @offsetOf(sdk.Gps, "_status");
+
+                var xyz: x.ByondXYZ = .{};
+                if (!x.Byond_XYZ(&machine.src, &xyz)) {
+                    std.log.err("Failed to get XYZ of an object", .{});
+
+                    return null;
+                }
+
+                const status: sdk.Gps.Status = .{
+                    .x = xyz.x,
+                    .y = xyz.y,
+                    .z = xyz.z,
+                };
+
+                return std.mem.asBytes(&status)[rel_offset];
+            },
+            else => return null,
+        }
+    }
+};
+
 pub const Device = union(enum) {
     none,
     tts: Tts,
     serial_terminal: SerialTerminal,
     signaler: Signaler,
+    gps: Gps,
 
     pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
         return switch (this.*) {
@@ -648,12 +671,13 @@ pub const Device = union(enum) {
             .tts => return this.tts.mmioRead(slot, machine, offset),
             .serial_terminal => return this.serial_terminal.mmioRead(slot, machine, offset),
             .signaler => return this.signaler.mmioRead(slot, machine, offset),
+            .gps => return this.gps.mmioRead(slot, machine, offset),
         };
     }
 
     pub inline fn mmioWrite(this: *Device, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         return switch (this.*) {
-            .none => return false,
+            .none, .gps => return false,
             .tts => return this.tts.mmioWrite(slot, machine, offset, value),
             .serial_terminal => return this.serial_terminal.mmioWrite(slot, machine, offset, value),
             .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
@@ -662,16 +686,15 @@ pub const Device = union(enum) {
 
     pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         return switch (this.*) {
-            .none => return false,
+            .none, .signaler, .gps => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
-            .signaler => return this.signaler.executeDma(slot, machine, cfg),
         };
     }
 
     pub inline fn syscall(this: *Device, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
         return switch (this.*) {
-            .none => return x.ByondValue{},
+            .none, .gps => return x.ByondValue{},
             .tts => return this.tts.syscall(slot, machine, args),
             .serial_terminal => return this.serial_terminal.syscall(slot, machine, args),
             .signaler => return this.signaler.syscall(slot, machine, args),
@@ -680,7 +703,7 @@ pub const Device = union(enum) {
 
     pub inline fn isInterruptPending(this: *Device, slot: u8, machine: *Machine) bool {
         return switch (this.*) {
-            .none => return false,
+            .none, .gps => return false,
             .tts => return this.tts.isInterruptPending(slot, machine),
             .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
             .signaler => return this.signaler.isInterruptPending(slot, machine),
@@ -693,6 +716,7 @@ pub const Device = union(enum) {
             .tts => return @sizeOf(sdk.Tts),
             .serial_terminal => return @sizeOf(sdk.SerialTerminal),
             .signaler => return @sizeOf(sdk.Signaler),
+            .gps => return @sizeOf(sdk.Gps),
         };
     }
 
@@ -702,12 +726,13 @@ pub const Device = union(enum) {
             .tts => .tts,
             .serial_terminal => .serial_terminal,
             .signaler => .signaler,
+            .gps => .gps,
         };
     }
 
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
-            .none, .tts, .signaler => {},
+            .none, .tts, .signaler, .gps => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
         }
     }
@@ -1730,6 +1755,7 @@ const State = struct {
                 },
             },
             .signaler => .{ .signaler = .{} },
+            .gps => .{ .gps = .{} },
         };
 
         return machine.tryAttachPci(device);
