@@ -1357,12 +1357,43 @@ const Machine = struct {
             return;
         }
 
+        if (this.rtc._config.interrupts.on_alarm and this.rtc._status.last_event.ty == .alarm) {
+            has_external_interrupt = true;
+
+            return;
+        }
+
         for (&this.pci.devices, 0..) |*device, slot| {
             if (device.isInterruptPending(@intCast(slot), this)) {
                 has_external_interrupt = true;
 
                 return;
             }
+        }
+    }
+
+    inline fn updateRtc(this: *Machine, timestamp: u64) void {
+        this.rtc._status.timestamp = timestamp;
+
+        if (this.rtc._config.interval == 0) {
+            this.rtc._status.prev_interval_at = timestamp;
+        } else {
+            const prev_interval_at: u64 = this.rtc._status.prev_interval_at;
+            const over_interval = switch (this.rtc._config.unit) {
+                .seconds => timestamp - prev_interval_at >= this.rtc._config.interval,
+                .minutes => timestamp - prev_interval_at >= this.rtc._config.interval * 60,
+                .hours => timestamp - prev_interval_at >= this.rtc._config.interval * 3600,
+                _ => false,
+            };
+
+            if (over_interval) {
+                this.rtc._status.prev_interval_at = @truncate(timestamp);
+                this.rtc._status.last_event = .{ .ty = .interval };
+            }
+        }
+
+        if (this.rtc._config.alarm != 0 and timestamp >= this.rtc._config.alarm) {
+            this.rtc._status.last_event = .{ .ty = .alarm };
         }
     }
 
@@ -2323,25 +2354,8 @@ const State = struct {
             machine.executed = machine.idle_executed;
 
             machine.clint._status.last_event = .{ .ty = .sync };
-            machine.rtc._status.timestamp = timestamp;
 
-            if (machine.rtc._config.interval == 0) {
-                machine.rtc._status.prev_interval_at = timestamp;
-            } else {
-                const prev_interval_at: u64 = machine.rtc._status.prev_interval_at;
-                const over_interval = switch (machine.rtc._config.unit) {
-                    .seconds => timestamp - prev_interval_at >= machine.rtc._config.interval,
-                    .minutes => timestamp - prev_interval_at >= machine.rtc._config.interval * 60,
-                    .hours => timestamp - prev_interval_at >= machine.rtc._config.interval * 3600,
-                    _ => false,
-                };
-
-                if (over_interval) {
-                    machine.rtc._status.prev_interval_at = @truncate(timestamp);
-                    machine.rtc._status.last_event = .{ .ty = .interval };
-                }
-            }
-
+            machine.updateRtc(timestamp);
             machine.updateExternalInterrupts();
 
             while (machine.executed < budget and machine.isRunnable()) {

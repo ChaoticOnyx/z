@@ -9,8 +9,8 @@
             .hash = "ondatra-0.16.0-dNNKzQ7sDwBMwr-AbxZ3crjKSVIEDyjZhoohur4CyEUM",
         },
         .mcu_sdk = .{
-            .url = "git+https://github.com/igorsaux/mcu-sdk#46d0d0f9550bd7f73b36f679832847a2df3d5b3c",
-            .hash = "mcu_sdk-0.0.0-5CQyuvWqAACwd4iliPpKhYENhbyzQ-7OBIpF6Yf5iRpi",
+            .url = "git+https://github.com/igorsaux/mcu-sdk#0c00230fdedd507a0ae25cbee35f6fbef6286c3a",
+            .hash = "mcu_sdk-0.0.0-5CQyurOrAACb9as6hfX1k8RAtjROZej4uXYjOPp-MioK",
         },
     },
 
