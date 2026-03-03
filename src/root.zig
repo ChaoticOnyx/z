@@ -1329,19 +1329,19 @@ const Machine = struct {
         var has_external_interrupt = false;
         defer this.cpu.registers.mip.meip = has_external_interrupt;
 
-        if (this.clint._config.interrupts.sync_pulse and this.clint._status.last_event.ty == .sync) {
+        if (this.clint._config.interrupts.on_sync_pulse and this.clint._status.last_event.ty == .sync) {
             has_external_interrupt = true;
 
             return;
         }
 
-        if (this.pci.mmio._config.interrupts.connected and this.pci.mmio._status.last_event.ty == .connected) {
+        if (this.pci.mmio._config.interrupts.on_connected and this.pci.mmio._status.last_event.ty == .connected) {
             has_external_interrupt = true;
 
             return;
         }
 
-        if (this.pci.mmio._config.interrupts.disconnected and this.pci.mmio._status.last_event.ty == .disconnected) {
+        if (this.pci.mmio._config.interrupts.on_disconnected and this.pci.mmio._status.last_event.ty == .disconnected) {
             has_external_interrupt = true;
 
             return;
