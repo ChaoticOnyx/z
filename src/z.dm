@@ -108,9 +108,11 @@ var/__z_name = null
 /// Returns `cycles_executed` at the previous`Z_MACHINES_TICK`, might not fit into f32
 #define Z_MACHINE_GET_EXECUTED(ID) call_ext(__z_name, "byond:Z_machine_get_executed")(ID)
 
-#define Z_MACHINE_SET_SENSORS(ID, TEMP, POWER_USAGE, OVERHEAT, THROTTLED) call_ext(__z_name, "byond:Z_machine_set_sensors")(ID, TEMP, POWER_USAGE, OVERHEAT, THROTTLED)
+#define Z_MACHINE_SET_SENSORS(ID, TEMP, OVERHEAT, THROTTLED) call_ext(__z_name, "byond:Z_machine_set_sensors")(ID, TEMP, OVERHEAT, THROTTLED)
 
 #define Z_MACHINE_SET_POWER(ID, BATTERY_CHARGE, HAS_EXTERNAL_SOURCE) call_ext(__z_name, "byond:Z_machine_set_power")(ID, BATTERY_CHARGE, HAS_EXTERNAL_SOURCE)
+
+#define Z_MACHINE_SET_TIME(ID, DAYS, SECONDS) call_ext(__z_name, "byond:Z_machine_set_time")(ID, DAYS, SECONDS)
 
 /// Sets the proc to be called after tick in Z_MACHINES_TICK.
 #define Z_MACHINE_SET_POST_TICK_PROC(ID, PROC) call_ext(__z_name, "byond:Z_machine_set_post_tick_proc")(ID, PROC)

@@ -79,13 +79,13 @@ inline fn dmaFill(pattern: []const u8, dst: []u8) void {
 
 inline fn genericMmioRead(this: anytype, offset: usize, comptime T: type) ?u8 {
     switch (offset) {
-        @offsetOf(T, "_config")...(@offsetOf(T, "_config") + @sizeOf(T.Config) - 1) => {
+        @offsetOf(T, "_config")...(@offsetOf(T, "_config") + sizeOfField(T, "_config") - 1) => {
             const rel_offset = offset - @offsetOf(T, "_config");
             const bytes = std.mem.asBytes(&this.mmio._config);
 
             return bytes[rel_offset];
         },
-        @offsetOf(T, "_status")...(@offsetOf(T, "_status") + @sizeOf(T.Status) - 1) => {
+        @offsetOf(T, "_status")...(@offsetOf(T, "_status") + sizeOfField(T, "_status") - 1) => {
             const rel_offset = offset - @offsetOf(T, "_status");
             const bytes = std.mem.asBytes(&this.mmio._status);
 
@@ -2019,7 +2019,7 @@ const State = struct {
         return machine.executed;
     }
 
-    pub inline fn machineSetSensors(this: *State, id: Machine.Id, temperature: i16, power_usage: u16, overheat: bool, throttled: bool) MachineSetSensorsError!void {
+    pub inline fn machineSetSensors(this: *State, id: Machine.Id, temperature: i16, overheat: bool, throttled: bool) MachineSetSensorsError!void {
         const machine = this.findMachine(id) orelse {
             this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
@@ -2028,7 +2028,6 @@ const State = struct {
 
         machine.sensors = .{
             .temperature = temperature,
-            .power_usage = power_usage,
             .flags = .{
                 .overheat = overheat,
                 .throttled = throttled,
@@ -2707,7 +2706,7 @@ pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callco
 pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
     const args = argv[0..argc];
 
-    if (args.len != 5) {
+    if (args.len != 4) {
         x.Byond_CRASH("Z_machine_set_sensors requires 5 argument");
 
         return returnCast(.{});
@@ -2716,11 +2715,10 @@ pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callcon
     const state = getState();
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
     const temperature: i32 = @intFromFloat(x.ByondValue_GetNum(&args[1]));
-    const power_usage: u32 = @intFromFloat(x.ByondValue_GetNum(&args[2]));
-    const overheat = x.ByondValue_IsTrue(&args[3]);
-    const throttled = x.ByondValue_IsTrue(&args[4]);
+    const overheat = x.ByondValue_IsTrue(&args[2]);
+    const throttled = x.ByondValue_IsTrue(&args[3]);
 
-    state.machineSetSensors(id, @truncate(temperature), @truncate(power_usage), overheat, throttled) catch {
+    state.machineSetSensors(id, @truncate(temperature), overheat, throttled) catch {
         return returnCast(x.False());
     };
 
