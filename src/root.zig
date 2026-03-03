@@ -8,6 +8,7 @@ const ondatra = @import("ondatra");
 const sdk = @import("mcu_sdk");
 
 const logger = @import("logger.zig");
+const os = @import("os.zig");
 const x = @import("x.zig");
 
 comptime {
@@ -81,13 +82,13 @@ inline fn genericMmioRead(this: anytype, offset: usize, comptime T: type) ?u8 {
     switch (offset) {
         @offsetOf(T, "_config")...(@offsetOf(T, "_config") + sizeOfField(T, "_config") - 1) => {
             const rel_offset = offset - @offsetOf(T, "_config");
-            const bytes = std.mem.asBytes(&this.mmio._config);
+            const bytes = std.mem.asBytes(&this._config);
 
             return bytes[rel_offset];
         },
         @offsetOf(T, "_status")...(@offsetOf(T, "_status") + sizeOfField(T, "_status") - 1) => {
             const rel_offset = offset - @offsetOf(T, "_status");
-            const bytes = std.mem.asBytes(&this.mmio._status);
+            const bytes = std.mem.asBytes(&this._status);
 
             return bytes[rel_offset];
         },
@@ -122,7 +123,7 @@ pub const Tts = struct {
         _ = slot;
         _ = machine;
 
-        return genericMmioRead(this, offset, sdk.Tts);
+        return genericMmioRead(&this.mmio, offset, sdk.Tts);
     }
 
     pub inline fn mmioWrite(this: *Tts, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -288,7 +289,7 @@ pub const SerialTerminal = struct {
         _ = slot;
         _ = machine;
 
-        return genericMmioRead(this, offset, sdk.SerialTerminal);
+        return genericMmioRead(&this.mmio, offset, sdk.SerialTerminal);
     }
 
     pub inline fn mmioWrite(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -496,7 +497,7 @@ pub const Signaler = struct {
         _ = slot;
         _ = machine;
 
-        return genericMmioRead(this, offset, sdk.Signaler);
+        return genericMmioRead(&this.mmio, offset, sdk.Signaler);
     }
 
     pub inline fn mmioWrite(this: *Signaler, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -658,7 +659,7 @@ pub const Light = struct {
         _ = slot;
         _ = machine;
 
-        return genericMmioRead(this, offset, sdk.Light);
+        return genericMmioRead(&this.mmio, offset, sdk.Light);
     }
 
     pub inline fn mmioWrite(this: *Light, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -776,7 +777,7 @@ pub const EnvSensor = struct {
         _ = slot;
         _ = machine;
 
-        return genericMmioRead(this, offset, sdk.EnvSensor);
+        return genericMmioRead(&this.mmio, offset, sdk.EnvSensor);
     }
 
     pub inline fn mmioWrite(this: *EnvSensor, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
@@ -1148,6 +1149,7 @@ const Machine = struct {
     sensors: sdk.Sensors = .{},
     power: sdk.Power = .{},
     clint: sdk.Clint = .{},
+    rtc: sdk.Rtc = .{},
 
     pub inline fn init(id: Machine.Id, src: x.ByondValue) Machine {
         const ram: []u8 = &.{};
@@ -1347,6 +1349,12 @@ const Machine = struct {
             return;
         }
 
+        if (this.rtc._config.interrupts.on_interval and this.rtc._status.last_event.ty == .interval) {
+            has_external_interrupt = true;
+
+            return;
+        }
+
         for (&this.pci.devices, 0..) |*device, slot| {
             if (device.isInterruptPending(@intCast(slot), this)) {
                 has_external_interrupt = true;
@@ -1379,6 +1387,10 @@ const Machine = struct {
             const bytes = std.mem.asBytes(&this.power);
 
             return bytes[offset];
+        } else if (address >= sdk.Memory.RTC and address < sdk.Memory.RTC + @sizeOf(sdk.Rtc)) {
+            const offset = address - sdk.Memory.RTC;
+
+            return this.readRtc(offset);
         } else if (address >= sdk.Memory.CLINT and address < sdk.Memory.CLINT + @sizeOf(sdk.Clint)) {
             const offset = address - sdk.Memory.CLINT;
 
@@ -1410,6 +1422,10 @@ const Machine = struct {
         }
 
         return null;
+    }
+
+    inline fn readRtc(this: *Machine, offset: u32) ?u8 {
+        return genericMmioRead(&this.rtc, offset, sdk.Rtc);
     }
 
     inline fn readClint(this: *Machine, offset: u32) ?u8 {
@@ -1492,7 +1508,11 @@ const Machine = struct {
         const cpu: *Cpu = @ptrCast(@alignCast(ctx));
         const this: *Machine = @fieldParentPtr("cpu", cpu);
 
-        if (address >= sdk.Memory.CLINT and address < sdk.Memory.CLINT + @sizeOf(sdk.Clint)) {
+        if (address >= sdk.Memory.RTC and address < sdk.Memory.RTC + @sizeOf(sdk.Rtc)) {
+            const offset = address - sdk.Memory.RTC;
+
+            return this.writeRtc(offset, value);
+        } else if (address >= sdk.Memory.CLINT and address < sdk.Memory.CLINT + @sizeOf(sdk.Clint)) {
             const offset = address - sdk.Memory.CLINT;
 
             return this.writeClint(offset, value);
@@ -1521,9 +1541,37 @@ const Machine = struct {
         return false;
     }
 
+    inline fn writeRtc(this: *Machine, offset: u32, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.Rtc, "_config")...(@offsetOf(sdk.Rtc, "_config") + sizeOfField(sdk.Rtc, "_config") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Rtc, "_config");
+                const bytes = std.mem.asBytes(&this.rtc._config);
+
+                bytes[rel_offset] = value;
+                this.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.Rtc, "_action")...(@offsetOf(sdk.Rtc, "_action") + sizeOfField(sdk.Rtc, "_action") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Rtc, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Rtc.Action, "ack") => {
+                        this.rtc._status.last_event = .{};
+                        this.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
     inline fn writeClint(this: *Machine, offset: u32, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + @sizeOf(sdk.Clint.Config) - 1) => {
+            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + sizeOfField(sdk.Clint, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Clint, "_config");
 
                 switch (rel_offset) {
@@ -1746,6 +1794,10 @@ pub const MachineSetSensorsError = error{
 };
 
 pub const MachineSetPowerError = error{
+    MachineNotFound,
+};
+
+pub const MachineSetShiftIdError = error{
     MachineNotFound,
 };
 
@@ -2048,6 +2100,16 @@ const State = struct {
         };
     }
 
+    pub inline fn machineSetShiftId(this: *State, id: Machine.Id, shift_id: u32) MachineSetShiftIdError!void {
+        const machine = this.findMachine(id) orelse {
+            this.last_error = @errorName(MachineSetShiftIdError.MachineNotFound);
+
+            return MachineSetShiftIdError.MachineNotFound;
+        };
+
+        machine.rtc._status.shift_id = shift_id;
+    }
+
     pub inline fn machineSetPostTickProc(this: *State, id: Machine.Id, proc_name_id: ?u32) MachineSetProcError!void {
         const machine = this.findMachine(id) orelse {
             this.last_error = @errorName(MachineSetProcError.MachineNotFound);
@@ -2207,6 +2269,7 @@ const State = struct {
             return;
         }
 
+        const timestamp: u64 = sdk.utils.DateTime.decompose(@bitCast(os.Timezone.getLocal().applyTo(std.time.timestamp()))).addYears(544).toTimestamp();
         var served: usize = 0;
 
         while (served < this.machines.items.len) : (served += 1) {
@@ -2257,6 +2320,24 @@ const State = struct {
             machine.executed = machine.idle_executed;
 
             machine.clint._status.last_event = .{ .ty = .sync };
+            machine.rtc._status.timestamp = timestamp;
+
+            if (machine.rtc._config.interval == 0) {
+                machine.rtc._status.prev_interval_at = timestamp;
+            } else {
+                const prev_interval_at: u64 = machine.rtc._status.prev_interval_at;
+                const over_interval = switch (machine.rtc._config.unit) {
+                    .seconds => timestamp - prev_interval_at >= machine.rtc._config.interval,
+                    .minutes => timestamp - prev_interval_at >= machine.rtc._config.interval * 60,
+                    .hours => timestamp - prev_interval_at >= machine.rtc._config.interval * 3600,
+                };
+
+                if (over_interval) {
+                    machine.rtc._status.prev_interval_at = @truncate(timestamp);
+                    machine.rtc._status.last_event = .{ .ty = .interval };
+                }
+            }
+
             machine.updateExternalInterrupts();
 
             while (machine.executed < budget and machine.isRunnable()) {
@@ -2742,6 +2823,45 @@ pub export fn Z_machine_set_power(argc: x.u4c, argv: [*c]x.ByondValue) callconv(
     state.machineSetPower(id, battery_charge, has_external_source) catch {
         return returnCast(x.False());
     };
+
+    return returnCast(x.True());
+}
+
+pub export fn Z_machine_set_shift_id(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnType {
+    const args = argv[0..argc];
+
+    if (args.len != 2) {
+        x.Byond_CRASH("Z_machine_set_shift_id requires 2 arguments");
+
+        return returnCast(.{});
+    }
+
+    const state = getState();
+    const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
+    const byond_shift_id = &args[1];
+
+    if (x.ByondValue_IsNum(byond_shift_id)) {
+        state.machineSetShiftId(id, @intFromFloat(x.ByondValue_GetNum(byond_shift_id))) catch {
+            return returnCast(x.False());
+        };
+    } else if (x.ByondValue_IsStr(byond_shift_id)) {
+        var buffer: [256]u8 = undefined;
+        var len: x.u4c = @intCast(buffer.len);
+
+        if (!x.Byond_ToString(byond_shift_id, &buffer, &len)) {
+            x.Byond_CRASH("The SHIFT_ID is too long");
+        }
+
+        const shift_id = std.hash.XxHash32.hash(0, buffer[0 .. len - 1 :0]);
+
+        state.machineSetShiftId(id, shift_id) catch {
+            return returnCast(x.False());
+        };
+    } else {
+        x.Byond_CRASH("The SHIFT_ID must be a number or a string");
+
+        return returnCast(.{});
+    }
 
     return returnCast(x.True());
 }

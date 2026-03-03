@@ -31,7 +31,7 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = os == .linux,
+        .link_libc = true,
         .strip = optimize != .Debug,
         .imports = &.{
             .{ .name = "ondatra", .module = ondatra.module("ondatra") },

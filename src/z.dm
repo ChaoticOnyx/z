@@ -112,7 +112,7 @@ var/__z_name = null
 
 #define Z_MACHINE_SET_POWER(ID, BATTERY_CHARGE, HAS_EXTERNAL_SOURCE) call_ext(__z_name, "byond:Z_machine_set_power")(ID, BATTERY_CHARGE, HAS_EXTERNAL_SOURCE)
 
-#define Z_MACHINE_SET_TIME(ID, DAYS, SECONDS) call_ext(__z_name, "byond:Z_machine_set_time")(ID, DAYS, SECONDS)
+#define Z_MACHINE_SET_SHIFT_ID(ID, SHIFT_ID) call_ext(__z_name, "byond:Z_machine_set_shift_id")(ID, SHIFT_ID)
 
 /// Sets the proc to be called after tick in Z_MACHINES_TICK.
 #define Z_MACHINE_SET_POST_TICK_PROC(ID, PROC) call_ext(__z_name, "byond:Z_machine_set_post_tick_proc")(ID, PROC)
