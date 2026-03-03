@@ -119,6 +119,11 @@ pub const Tts = struct {
     memory: [sdk.Tts.BUFFER_SIZE]u8 = std.mem.zeroes([sdk.Tts.BUFFER_SIZE]u8),
     mmio: sdk.Tts = .{},
 
+    pub inline fn reset(this: *Tts) void {
+        @memset(&this.memory, 0);
+        this.mmio = .{};
+    }
+
     pub inline fn mmioRead(this: *Tts, slot: u8, machine: *Machine, offset: usize) ?u8 {
         _ = slot;
         _ = machine;
@@ -159,7 +164,7 @@ pub const Tts = struct {
                         var byond_msg: x.ByondValue = .{};
                         x.ByondValue_SetStr(&byond_msg, msg);
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.say.byond(), byond_msg });
+                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.say.byond(), byond_msg, x.Num(@intFromEnum(this.mmio._config.language)) });
                     },
                     @offsetOf(sdk.Tts.Action, "ack") => {
                         this.mmio._status.last_event = .{};
@@ -284,6 +289,12 @@ pub const SerialTerminal = struct {
             .output = output,
             .input = input,
         };
+    }
+
+    pub inline fn reset(this: *SerialTerminal) void {
+        @memset(this.output, 0);
+        @memset(this.input, 0);
+        this.mmio = .{};
     }
 
     pub inline fn mmioRead(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize) ?u8 {
@@ -495,6 +506,10 @@ pub const Signaler = struct {
 
     mmio: sdk.Signaler = .{},
 
+    pub inline fn reset(this: *Signaler) void {
+        this.mmio = .{};
+    }
+
     pub inline fn mmioRead(this: *Signaler, slot: u8, machine: *Machine, offset: usize) ?u8 {
         _ = slot;
         _ = machine;
@@ -657,6 +672,10 @@ pub const Light = struct {
 
     mmio: sdk.Light = .{},
 
+    pub inline fn reset(this: *Light) void {
+        this.mmio = .{};
+    }
+
     pub inline fn mmioRead(this: *Light, slot: u8, machine: *Machine, offset: usize) ?u8 {
         _ = slot;
         _ = machine;
@@ -774,6 +793,10 @@ pub const EnvSensor = struct {
     };
 
     mmio: sdk.EnvSensor = .{},
+
+    pub inline fn reset(this: *EnvSensor) void {
+        this.mmio = .{};
+    }
 
     pub inline fn mmioRead(this: *EnvSensor, slot: u8, machine: *Machine, offset: usize) ?u8 {
         _ = slot;
@@ -1086,6 +1109,17 @@ pub const Device = union(enum) {
         };
     }
 
+    pub inline fn reset(this: *Device) void {
+        switch (this.*) {
+            .none, .gps => {},
+            .tts => this.tts.reset(),
+            .serial_terminal => this.serial_terminal.reset(),
+            .signaler => this.signaler.reset(),
+            .light => this.light.reset(),
+            .env_sensor => this.env_sensor.reset(),
+        }
+    }
+
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
             .none, .tts, .signaler, .gps, .light, .env_sensor => {},
@@ -1097,6 +1131,12 @@ pub const Device = union(enum) {
 pub const Pci = struct {
     mmio: sdk.Pci = .{},
     devices: [sdk.Pci.MAX_DEVICES]Device = .{.none} ** sdk.Pci.MAX_DEVICES,
+
+    pub inline fn reset(this: *Pci) void {
+        for (&this.devices) |*device| {
+            device.reset();
+        }
+    }
 
     pub inline fn deinit(this: *Pci, allocator: std.mem.Allocator) void {
         for (&this.devices) |*device| {
@@ -1165,6 +1205,21 @@ const Machine = struct {
             .prng = .init(prng_seed),
             .src = src,
         };
+    }
+
+    pub inline fn reset(this: *Machine) void {
+        @memset(this.cpu.ram, 0);
+        this.cpu.registers = .{};
+        this.utilization = 0.0;
+        this.executed = 0;
+        this.idle_executed = 0;
+        this.overshoot = 0;
+        this.debt = 0;
+        this.dma = .{};
+        this.sensors = .{};
+        this.power = .{};
+        this.clint = .{};
+        this.rtc = .{};
     }
 
     pub inline fn deinit(this: *Machine, allocator: std.mem.Allocator) void {
@@ -1920,8 +1975,7 @@ const State = struct {
             return MachineConnectError.MachineNotFound;
         };
 
-        @memset(machine.cpu.ram, 0);
-        machine.cpu.registers = .{};
+        machine.reset();
     }
 
     pub inline fn machineSetRamSize(this: *State, id: Machine.Id, ram_size: u32) MachineSetRamSizeError!void {
