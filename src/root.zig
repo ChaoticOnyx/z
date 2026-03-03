@@ -206,6 +206,7 @@ pub const Tts = struct {
 
                 return true;
             },
+            else => return false,
         }
     }
 
@@ -388,6 +389,7 @@ pub const SerialTerminal = struct {
 
                 return true;
             },
+            else => return false,
         }
     }
 
@@ -1686,6 +1688,7 @@ const Machine = struct {
                     return false;
                 }
             },
+            else => return false,
         }
 
         if (this.dma._config.channel >= sdk.Pci.MAX_DEVICES) {
@@ -2330,6 +2333,7 @@ const State = struct {
                     .seconds => timestamp - prev_interval_at >= machine.rtc._config.interval,
                     .minutes => timestamp - prev_interval_at >= machine.rtc._config.interval * 60,
                     .hours => timestamp - prev_interval_at >= machine.rtc._config.interval * 3600,
+                    _ => false,
                 };
 
                 if (over_interval) {
