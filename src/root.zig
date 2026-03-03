@@ -127,7 +127,7 @@ pub const Tts = struct {
 
     pub inline fn mmioWrite(this: *Tts, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + @sizeOf(sdk.Tts.Config) - 1) => {
+            @offsetOf(sdk.Tts, "_config")...(@offsetOf(sdk.Tts, "_config") + sizeOfField(sdk.Tts, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Tts, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
@@ -136,7 +136,7 @@ pub const Tts = struct {
 
                 return true;
             },
-            @offsetOf(sdk.Tts, "_action")...(@offsetOf(sdk.Tts, "_action") + @sizeOf(sdk.Tts.Action) - 1) => {
+            @offsetOf(sdk.Tts, "_action")...(@offsetOf(sdk.Tts, "_action") + sizeOfField(sdk.Tts, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Tts, "_action");
 
                 switch (rel_offset) {
@@ -293,7 +293,7 @@ pub const SerialTerminal = struct {
 
     pub inline fn mmioWrite(this: *SerialTerminal, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + @sizeOf(sdk.SerialTerminal.Config) - 1) => {
+            @offsetOf(sdk.SerialTerminal, "_config")...(@offsetOf(sdk.SerialTerminal, "_config") + sizeOfField(sdk.SerialTerminal, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
@@ -302,7 +302,7 @@ pub const SerialTerminal = struct {
 
                 return true;
             },
-            @offsetOf(sdk.SerialTerminal, "_action")...(@offsetOf(sdk.SerialTerminal, "_action") + @sizeOf(sdk.SerialTerminal.Action) - 1) => {
+            @offsetOf(sdk.SerialTerminal, "_action")...(@offsetOf(sdk.SerialTerminal, "_action") + sizeOfField(sdk.SerialTerminal, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_action");
 
                 switch (rel_offset) {
@@ -501,7 +501,7 @@ pub const Signaler = struct {
 
     pub inline fn mmioWrite(this: *Signaler, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + @sizeOf(sdk.Signaler.Config) - 1) => {
+            @offsetOf(sdk.Signaler, "_config")...(@offsetOf(sdk.Signaler, "_config") + sizeOfField(sdk.Signaler, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Signaler, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
@@ -510,7 +510,7 @@ pub const Signaler = struct {
 
                 return true;
             },
-            @offsetOf(sdk.Signaler, "_action")...(@offsetOf(sdk.Signaler, "_action") + @sizeOf(sdk.Signaler.Action) - 1) => {
+            @offsetOf(sdk.Signaler, "_action")...(@offsetOf(sdk.Signaler, "_action") + sizeOfField(sdk.Signaler, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Signaler, "_action");
 
                 switch (rel_offset) {
@@ -607,7 +607,7 @@ pub const Gps = struct {
         _ = slot;
 
         switch (offset) {
-            @offsetOf(sdk.Gps, "_status")...(@offsetOf(sdk.Gps, "_status") + @sizeOf(sdk.Gps) - 1) => {
+            @offsetOf(sdk.Gps, "_status")...(@offsetOf(sdk.Gps, "_status") + sizeOfField(sdk.Gps, "_status") - 1) => {
                 machine.idle_executed += 100;
 
                 const rel_offset = offset - @offsetOf(sdk.Gps, "_status");
@@ -663,7 +663,7 @@ pub const Light = struct {
 
     pub inline fn mmioWrite(this: *Light, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Light, "_config")...(@offsetOf(sdk.Light, "_config") + @sizeOf(sdk.Light.Config) - 1) => {
+            @offsetOf(sdk.Light, "_config")...(@offsetOf(sdk.Light, "_config") + sizeOfField(sdk.Light, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Light, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
@@ -672,7 +672,7 @@ pub const Light = struct {
 
                 return true;
             },
-            @offsetOf(sdk.Light, "_action")...(@offsetOf(sdk.Light, "_action") + @sizeOf(sdk.Light.Action) - 1) => {
+            @offsetOf(sdk.Light, "_action")...(@offsetOf(sdk.Light, "_action") + sizeOfField(sdk.Light, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Light, "_action");
 
                 switch (rel_offset) {
@@ -781,7 +781,7 @@ pub const EnvSensor = struct {
 
     pub inline fn mmioWrite(this: *EnvSensor, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.EnvSensor, "_config")...(@offsetOf(sdk.EnvSensor, "_config") + @sizeOf(sdk.EnvSensor.Config) - 1) => {
+            @offsetOf(sdk.EnvSensor, "_config")...(@offsetOf(sdk.EnvSensor, "_config") + sizeOfField(sdk.EnvSensor, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.EnvSensor, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
@@ -790,7 +790,7 @@ pub const EnvSensor = struct {
 
                 return true;
             },
-            @offsetOf(sdk.EnvSensor, "_action")...(@offsetOf(sdk.EnvSensor, "_action") + @sizeOf(sdk.EnvSensor.Action) - 1) => {
+            @offsetOf(sdk.EnvSensor, "_action")...(@offsetOf(sdk.EnvSensor, "_action") + sizeOfField(sdk.EnvSensor, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.EnvSensor, "_action");
 
                 switch (rel_offset) {
@@ -1147,6 +1147,7 @@ const Machine = struct {
     pci: Pci = .{},
     sensors: sdk.Sensors = .{},
     power: sdk.Power = .{},
+    clint: sdk.Clint = .{},
 
     pub inline fn init(id: Machine.Id, src: x.ByondValue) Machine {
         const ram: []u8 = &.{};
@@ -1328,6 +1329,12 @@ const Machine = struct {
         var has_external_interrupt = false;
         defer this.cpu.registers.mip.meip = has_external_interrupt;
 
+        if (this.clint._config.interrupts.sync_pulse and this.clint._status.last_event.ty == .sync) {
+            has_external_interrupt = true;
+
+            return;
+        }
+
         if (this.pci.mmio._config.interrupts.connected and this.pci.mmio._status.last_event.ty == .connected) {
             has_external_interrupt = true;
 
@@ -1407,7 +1414,7 @@ const Machine = struct {
 
     inline fn readClint(this: *Machine, offset: u32) ?u8 {
         switch (offset) {
-            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + @sizeOf(sdk.Clint.Config) - 1) => {
+            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + sizeOfField(sdk.Clint, "_status") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Clint, "_config");
 
                 switch (rel_offset) {
@@ -1423,8 +1430,20 @@ const Machine = struct {
 
                         return bytes[byte];
                     },
+                    @offsetOf(sdk.Clint.Config, "interrupts")...(@offsetOf(sdk.Clint.Config, "interrupts") + sizeOfField(sdk.Clint.Config, "interrupts") - 1) => {
+                        const byte = rel_offset - @offsetOf(sdk.Clint.Config, "interrupts");
+                        const bytes = std.mem.asBytes(&this.clint._config.interrupts);
+
+                        return bytes[byte];
+                    },
                     else => return null,
                 }
+            },
+            @offsetOf(sdk.Clint, "_status")...(@offsetOf(sdk.Clint, "_status") + sizeOfField(sdk.Clint, "_status") - 1) => {
+                const byte = offset - @offsetOf(sdk.Clint, "_status");
+                const bytes = std.mem.asBytes(&this.clint._status);
+
+                return bytes[byte];
             },
             else => return null,
         }
@@ -1432,7 +1451,7 @@ const Machine = struct {
 
     inline fn readPrng(this: *Machine, offset: u32) ?u8 {
         switch (offset) {
-            @offsetOf(sdk.Prng, "_status")...(@offsetOf(sdk.Prng, "_status") + @sizeOf(sdk.Prng.Status) - 1) => {
+            @offsetOf(sdk.Prng, "_status")...(@offsetOf(sdk.Prng, "_status") + sizeOfField(sdk.Prng, "_status") - 1) => {
                 return @truncate(this.prng.next());
             },
             else => return null,
@@ -1441,7 +1460,7 @@ const Machine = struct {
 
     inline fn readDma(this: *Machine, offset: u32) ?u8 {
         switch (offset) {
-            @offsetOf(sdk.Dma, "_config")...(@offsetOf(sdk.Dma, "_config") + @sizeOf(sdk.Dma.Config) - 1) => {
+            @offsetOf(sdk.Dma, "_config")...(@offsetOf(sdk.Dma, "_config") + sizeOfField(sdk.Dma, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Dma, "_config");
                 const bytes = std.mem.asBytes(&this.dma._config);
 
@@ -1453,13 +1472,13 @@ const Machine = struct {
 
     inline fn readPci(this: *Machine, offset: u32) ?u8 {
         switch (offset) {
-            @offsetOf(sdk.Pci, "_config")...(@offsetOf(sdk.Pci, "_config") + @sizeOf(sdk.Pci.Config) - 1) => {
+            @offsetOf(sdk.Pci, "_config")...(@offsetOf(sdk.Pci, "_config") + sizeOfField(sdk.Pci, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Pci, "_config");
                 const bytes = std.mem.asBytes(&this.pci.mmio._config);
 
                 return bytes[rel_offset];
             },
-            @offsetOf(sdk.Pci, "_status")...(@offsetOf(sdk.Pci, "_status") + @sizeOf(sdk.Pci.Status) - 1) => {
+            @offsetOf(sdk.Pci, "_status")...(@offsetOf(sdk.Pci, "_status") + sizeOfField(sdk.Pci, "_status") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Pci, "_status");
                 const bytes = std.mem.asBytes(&this.pci.mmio._status);
 
@@ -1526,6 +1545,28 @@ const Machine = struct {
 
                         return true;
                     },
+                    @offsetOf(sdk.Clint.Config, "interrupts")...(@offsetOf(sdk.Clint.Config, "interrupts") + sizeOfField(sdk.Clint.Config, "interrupts") - 1) => {
+                        const byte = rel_offset - @offsetOf(sdk.Clint.Config, "interrupts");
+                        const bytes = std.mem.asBytes(&this.clint._config.interrupts);
+
+                        bytes[byte] = value;
+                        this.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            @offsetOf(sdk.Clint, "_action")...(@offsetOf(sdk.Clint, "_action") + sizeOfField(sdk.Clint, "_action") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Clint, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Clint.Action, "ack") => {
+                        this.clint._status.last_event = .{};
+                        this.updateExternalInterrupts();
+
+                        return true;
+                    },
                     else => return false,
                 }
             },
@@ -1535,7 +1576,7 @@ const Machine = struct {
 
     inline fn writeDma(this: *Machine, offset: u32, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Dma, "_config")...(@offsetOf(sdk.Dma, "_config") + @sizeOf(sdk.Dma.Config) - 1) => {
+            @offsetOf(sdk.Dma, "_config")...(@offsetOf(sdk.Dma, "_config") + sizeOfField(sdk.Dma, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Dma, "_config");
                 const bytes = std.mem.asBytes(&this.dma._config);
 
@@ -1543,7 +1584,7 @@ const Machine = struct {
 
                 return true;
             },
-            @offsetOf(sdk.Dma, "_action")...(@offsetOf(sdk.Dma, "_action") + @sizeOf(sdk.Dma.Action) - 1) => {
+            @offsetOf(sdk.Dma, "_action")...(@offsetOf(sdk.Dma, "_action") + sizeOfField(sdk.Dma, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Dma, "_action");
 
                 switch (rel_offset) {
@@ -1559,7 +1600,7 @@ const Machine = struct {
 
     inline fn writePci(this: *Machine, offset: u32, value: u8) bool {
         switch (offset) {
-            @offsetOf(sdk.Pci, "_config")...(@offsetOf(sdk.Pci, "_config") + @sizeOf(sdk.Pci.Config) - 1) => {
+            @offsetOf(sdk.Pci, "_config")...(@offsetOf(sdk.Pci, "_config") + sizeOfField(sdk.Pci, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Pci, "_config");
                 const bytes = std.mem.asBytes(&this.pci.mmio._config);
 
@@ -1568,7 +1609,7 @@ const Machine = struct {
 
                 return true;
             },
-            @offsetOf(sdk.Pci, "_action")...(@offsetOf(sdk.Pci, "_action") + @sizeOf(sdk.Pci.Action) - 1) => {
+            @offsetOf(sdk.Pci, "_action")...(@offsetOf(sdk.Pci, "_action") + sizeOfField(sdk.Pci, "_action") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Pci, "_action");
 
                 switch (rel_offset) {
@@ -2215,6 +2256,9 @@ const State = struct {
             machine.overshoot = 0;
 
             machine.executed = machine.idle_executed;
+
+            machine.clint._status.last_event = .{ .ty = .sync };
+            machine.updateExternalInterrupts();
 
             while (machine.executed < budget and machine.isRunnable()) {
                 const before = machine.cpu.registers.cycle;
