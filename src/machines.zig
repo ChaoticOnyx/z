@@ -1898,7 +1898,6 @@ pub const State = struct {
     robin_index: usize = 0,
     budget_percent: usize = 40,
     stats: Stats = .{},
-    last_error: ?[:0]const u8 = null,
 
     pub inline fn init(allocator: std.mem.Allocator) State {
         return .{
@@ -1908,13 +1907,13 @@ pub const State = struct {
 
     pub inline fn machineCreate(this: *State, src: x.ByondValue) MachineCreationError!Machine.Id {
         if (x.ByondValue_IsNull(&src)) {
-            this.last_error = @errorName(MachineCreationError.BadSrc);
+            z.getState().last_error = @errorName(MachineCreationError.BadSrc);
 
             return MachineCreationError.BadSrc;
         }
 
         if (this.next_id == std.math.maxInt(Machine.Id)) {
-            this.last_error = @errorName(MachineCreationError.OutOfId);
+            z.getState().last_error = @errorName(MachineCreationError.OutOfId);
 
             return MachineCreationError.OutOfId;
         }
@@ -1922,7 +1921,7 @@ pub const State = struct {
         const machine: Machine = .init(this.next_id, src);
 
         this.machines.append(this.allocator, machine) catch {
-            this.last_error = @errorName(MachineCreationError.OutOfMemory);
+            z.getState().last_error = @errorName(MachineCreationError.OutOfMemory);
 
             return MachineCreationError.OutOfMemory;
         };
@@ -1933,7 +1932,7 @@ pub const State = struct {
 
     pub inline fn machineReset(this: *State, id: Machine.Id) MachineResetError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineConnectError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineConnectError.MachineNotFound);
 
             return MachineConnectError.MachineNotFound;
         };
@@ -1943,13 +1942,13 @@ pub const State = struct {
 
     pub inline fn machineSetRamSize(this: *State, id: Machine.Id, ram_size: u32) MachineSetRamSizeError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
 
         const new_ram = this.allocator.alloc(u8, ram_size) catch {
-            this.last_error = @errorName(MachineSetRamSizeError.OutOfRam);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.OutOfRam);
 
             return MachineSetRamSizeError.OutOfRam;
         };
@@ -1960,7 +1959,7 @@ pub const State = struct {
 
     pub inline fn machineGetRamSize(this: *State, id: Machine.Id) MachineGetRamSizeError!u32 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineGetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineGetRamSizeError.MachineNotFound);
 
             return MachineGetRamSizeError.MachineNotFound;
         };
@@ -1970,13 +1969,13 @@ pub const State = struct {
 
     pub inline fn machineReadRamByte(this: *State, id: Machine.Id, address: u32) MachineReadRamError!u8 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineReadRamError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineReadRamError.MachineNotFound);
 
             return MachineReadRamError.MachineNotFound;
         };
 
         if (address >= machine.cpu.ram.len) {
-            this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
             return MachineReadRamError.OutOfBounds;
         }
@@ -1986,13 +1985,13 @@ pub const State = struct {
 
     pub inline fn machineWriteRamByte(this: *State, id: Machine.Id, address: u32, value: u8) MachineWriteRamError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineWriteRamError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineWriteRamError.MachineNotFound);
 
             return MachineWriteRamError.MachineNotFound;
         };
 
         if (address >= machine.cpu.ram.len) {
-            this.last_error = @errorName(MachineWriteRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineWriteRamError.OutOfBounds);
 
             return MachineWriteRamError.OutOfBounds;
         }
@@ -2002,14 +2001,14 @@ pub const State = struct {
 
     pub inline fn machineReadRamBytes(this: *State, id: Machine.Id, address: u32, dst: *const x.ByondValue) MachineReadRamError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineReadRamError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineReadRamError.MachineNotFound);
 
             return MachineReadRamError.MachineNotFound;
         };
 
         var byond_len: x.ByondValue = .{};
         if (!x.Byond_Length(dst, &byond_len)) {
-            this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
             return MachineReadRamError.OutOfBounds;
         }
@@ -2017,14 +2016,14 @@ pub const State = struct {
         const len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_len));
 
         if (address +| len > machine.cpu.ram.len) {
-            this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
             return MachineReadRamError.OutOfBounds;
         }
 
         for (0..len) |idx| {
             if (!x.Byond_WriteListIndex(dst, &x.Num(idx + 1), &x.Num(machine.cpu.ram[address + idx]))) {
-                this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+                z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
             }
@@ -2033,14 +2032,14 @@ pub const State = struct {
 
     pub inline fn machineWriteRamBytes(this: *State, id: Machine.Id, address: u32, src: *const x.ByondValue) MachineWriteRamError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineWriteRamError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineWriteRamError.MachineNotFound);
 
             return MachineWriteRamError.MachineNotFound;
         };
 
         var byond_len: x.ByondValue = .{};
         if (!x.Byond_Length(src, &byond_len)) {
-            this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
             return MachineReadRamError.OutOfBounds;
         }
@@ -2048,7 +2047,7 @@ pub const State = struct {
         const len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_len));
 
         if (address +| len > machine.cpu.ram.len) {
-            this.last_error = @errorName(MachineWriteRamError.OutOfBounds);
+            z.getState().last_error = @errorName(MachineWriteRamError.OutOfBounds);
 
             return MachineWriteRamError.OutOfBounds;
         }
@@ -2057,7 +2056,7 @@ pub const State = struct {
             var byond_value: x.ByondValue = .{};
 
             if (!x.Byond_ReadListIndex(src, &x.Num(idx + 1), &byond_value)) {
-                this.last_error = @errorName(MachineReadRamError.OutOfBounds);
+                z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
             }
@@ -2070,7 +2069,7 @@ pub const State = struct {
 
     pub inline fn machineSetFrequency(this: *State, id: Machine.Id, frequency: u32) MachineSetFrequencyError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
@@ -2080,13 +2079,13 @@ pub const State = struct {
 
     pub inline fn machineSetState(this: *State, id: Machine.Id, state: u32) MachineSetStateError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
 
         machine.state = std.enums.fromInt(Machine.State, state) orelse {
-            this.last_error = @errorName(MachineSetStateError.BadState);
+            z.getState().last_error = @errorName(MachineSetStateError.BadState);
 
             return MachineSetStateError.BadState;
         };
@@ -2094,7 +2093,7 @@ pub const State = struct {
 
     pub inline fn machineGetState(this: *State, id: Machine.Id) MachineGetStateError!Machine.State {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
@@ -2104,7 +2103,7 @@ pub const State = struct {
 
     pub inline fn machineGetUtilization(this: *State, id: Machine.Id) MachineGetUtilizationError!f32 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
@@ -2114,7 +2113,7 @@ pub const State = struct {
 
     pub inline fn machineGetExecuted(this: *State, id: Machine.Id) MachineGetExecutedError!u64 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
@@ -2124,7 +2123,7 @@ pub const State = struct {
 
     pub inline fn machineSetSensors(this: *State, id: Machine.Id, temperature: i16, overheat: bool, throttled: bool) MachineSetSensorsError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
 
             return MachineSetRamSizeError.MachineNotFound;
         };
@@ -2140,7 +2139,7 @@ pub const State = struct {
 
     pub inline fn machineSetPower(this: *State, id: Machine.Id, battery_charge: u32, has_external_source: bool) MachineSetPowerError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetPowerError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetPowerError.MachineNotFound);
 
             return MachineSetPowerError.MachineNotFound;
         };
@@ -2153,7 +2152,7 @@ pub const State = struct {
 
     pub inline fn machineSetShiftId(this: *State, id: Machine.Id, shift_id: u32) MachineSetShiftIdError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetShiftIdError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetShiftIdError.MachineNotFound);
 
             return MachineSetShiftIdError.MachineNotFound;
         };
@@ -2163,7 +2162,7 @@ pub const State = struct {
 
     pub inline fn machineSetPostTickProc(this: *State, id: Machine.Id, proc_name_id: ?u32) MachineSetProcError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetProcError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetProcError.MachineNotFound);
 
             return MachineSetProcError.MachineNotFound;
         };
@@ -2173,7 +2172,7 @@ pub const State = struct {
 
     pub inline fn machineSetTrapProc(this: *State, id: Machine.Id, proc_name_id: ?u32) MachineSetProcError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetProcError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetProcError.MachineNotFound);
 
             return MachineSetProcError.MachineNotFound;
         };
@@ -2183,7 +2182,7 @@ pub const State = struct {
 
     pub inline fn machineSetSyscallProc(this: *State, id: Machine.Id, proc_name_id: ?u32) MachineSetProcError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSetProcError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSetProcError.MachineNotFound);
 
             return MachineSetProcError.MachineNotFound;
         };
@@ -2193,29 +2192,29 @@ pub const State = struct {
 
     pub inline fn machineLoadElf(this: *State, id: Machine.Id, path: []const u8) MachineLoadElfError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineLoadElfError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineLoadElfError.MachineNotFound);
 
             return MachineLoadElfError.MachineNotFound;
         };
 
         const file_content = std.fs.cwd().readFileAlloc(this.allocator, path, MAX_FILE_SIZE) catch |err| switch (err) {
             error.FileNotFound => {
-                this.last_error = @errorName(MachineLoadElfError.FileNotFound);
+                z.getState().last_error = @errorName(MachineLoadElfError.FileNotFound);
 
                 return MachineLoadElfError.FileNotFound;
             },
             error.FileTooBig => {
-                this.last_error = @errorName(MachineLoadElfError.FileTooBig);
+                z.getState().last_error = @errorName(MachineLoadElfError.FileTooBig);
 
                 return MachineLoadElfError.FileTooBig;
             },
             error.OutOfMemory => {
-                this.last_error = @errorName(MachineLoadElfError.OutOfMemory);
+                z.getState().last_error = @errorName(MachineLoadElfError.OutOfMemory);
 
                 return MachineLoadElfError.OutOfMemory;
             },
             else => {
-                this.last_error = @errorName(MachineLoadElfError.Unknown);
+                z.getState().last_error = @errorName(MachineLoadElfError.Unknown);
 
                 return MachineLoadElfError.Unknown;
             },
@@ -2225,12 +2224,12 @@ pub const State = struct {
 
         _ = machine.loadElf(this.allocator, file_content) catch |err| switch (err) {
             error.OutOfRam => {
-                this.last_error = @errorName(MachineLoadElfError.OutOfRam);
+                z.getState().last_error = @errorName(MachineLoadElfError.OutOfRam);
 
                 return MachineLoadElfError.OutOfRam;
             },
             else => {
-                this.last_error = @errorName(MachineLoadElfError.BadElf);
+                z.getState().last_error = @errorName(MachineLoadElfError.BadElf);
 
                 return MachineLoadElfError.BadElf;
             },
@@ -2239,13 +2238,13 @@ pub const State = struct {
 
     pub inline fn machineSyscall(this: *State, id: Machine.Id, slot: u8, args: []const x.ByondValue) MachineSyscallError!x.ByondValue {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineSyscallError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineSyscallError.MachineNotFound);
 
             return MachineSyscallError.MachineNotFound;
         };
 
         return machine.syscall(slot, args) catch |err| {
-            this.last_error = @errorName(err);
+            z.getState().last_error = @errorName(err);
 
             return err;
         };
@@ -2253,20 +2252,20 @@ pub const State = struct {
 
     pub inline fn machineTryAttachPci(this: *State, id: Machine.Id, type_id: u8) MachineAttachPciError!?u8 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineAttachPciError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineAttachPciError.MachineNotFound);
 
             return MachineAttachPciError.MachineNotFound;
         };
 
         const sdk_type_id = std.enums.fromInt(sdk.Pci.DeviceType, type_id) orelse {
-            this.last_error = @errorName(MachineAttachPciError.BadDeviceType);
+            z.getState().last_error = @errorName(MachineAttachPciError.BadDeviceType);
 
             return MachineAttachPciError.BadDeviceType;
         };
 
         const device: Device = switch (sdk_type_id) {
             .none, _ => {
-                this.last_error = @errorName(MachineAttachPciError.BadDeviceType);
+                z.getState().last_error = @errorName(MachineAttachPciError.BadDeviceType);
 
                 return MachineAttachPciError.BadDeviceType;
             },
@@ -2274,7 +2273,7 @@ pub const State = struct {
             .serial_terminal => .{
                 .serial_terminal = SerialTerminal.init(this.allocator) catch {
                     std.log.err("Failed to allocate memory for a serial terminal device", .{});
-                    this.last_error = @errorName(MachineAttachPciError.OutOfMemory);
+                    z.getState().last_error = @errorName(MachineAttachPciError.OutOfMemory);
 
                     return MachineAttachPciError.OutOfMemory;
                 },
@@ -2290,7 +2289,7 @@ pub const State = struct {
 
     pub inline fn machineTryDetachPci(this: *State, id: Machine.Id, slot: u8) MachineDetachPciError!bool {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineDetachPciError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineDetachPciError.MachineNotFound);
 
             return MachineDetachPciError.MachineNotFound;
         };
@@ -2300,7 +2299,7 @@ pub const State = struct {
 
     pub inline fn machineAppendCounters(this: *State, id: Machine.Id, cycles: u64, idle_cycles: u64, mtime: u64) MachineAppendCountersError!void {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineAppendCountersError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineAppendCountersError.MachineNotFound);
 
             return MachineAppendCountersError.MachineNotFound;
         };
@@ -2310,7 +2309,7 @@ pub const State = struct {
         machine.cpu.registers.mtime +%= mtime;
     }
 
-    pub inline fn machinesTick(this: *State, delta_us: u32) void {
+    pub inline fn tick(this: *State, delta_us: u32) void {
         const wall_budget_us: i64 = @divFloor(@as(i64, delta_us) * this.budget_percent, 100);
         const wall_start = std.time.microTimestamp();
 
@@ -2421,21 +2420,21 @@ pub const State = struct {
 
     pub inline fn machineDumpRegisters(this: *State, id: Machine.Id) MachineDumpRegistersError![:0]u8 {
         const machine = this.findMachine(id) orelse {
-            this.last_error = @errorName(MachineDumpRegistersError.MachineNotFound);
+            z.getState().last_error = @errorName(MachineDumpRegistersError.MachineNotFound);
 
             return MachineDumpRegistersError.MachineNotFound;
         };
 
         var writer: std.Io.Writer.Allocating = .init(this.allocator);
         std.json.Stringify.value(machine.cpu.registers, .{}, &writer.writer) catch {
-            this.last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
+            z.getState().last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
 
             return MachineDumpRegistersError.OutOfMemory;
         };
         errdefer writer.deinit();
 
         return writer.toOwnedSliceSentinel(0) catch {
-            this.last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
+            z.getState().last_error = @errorName(MachineDumpRegistersError.OutOfMemory);
 
             return MachineDumpRegistersError.OutOfMemory;
         };
@@ -2505,25 +2504,6 @@ pub const State = struct {
         return null;
     }
 };
-
-pub export fn Z_get_last_error(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
-    _ = argv;
-
-    if (argc != 0) {
-        x.Byond_CRASH("Z_get_last_error does not accept args");
-
-        return z.returnCast(.{});
-    }
-
-    const state = getState();
-    var ret: x.ByondValue = .{};
-
-    if (state.last_error) |msg| {
-        x.ByondValue_SetStr(&ret, msg);
-    }
-
-    return z.returnCast(ret);
-}
 
 pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
     const args = argv[0..argc];
@@ -3157,7 +3137,7 @@ pub export fn Z_machines_tick(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) 
     const state = getState();
     const delta_us: u32 = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
-    state.machinesTick(delta_us);
+    state.tick(delta_us);
 
     return z.returnCast(x.True());
 }

@@ -394,9 +394,9 @@ pub inline fn Byond_CallGlobalProc(name: [:0]const u8, arg: []const ByondValue, 
     return table.Byond_CallGlobalProc(name, arg.ptr, @intCast(arg.len), result);
 }
 
-pub inline fn Byond_CallGlobalProcByStrId(name: u4c, arg: *const ByondValue, arg_count: u4c, result: *ByondValue) bool {
+pub inline fn Byond_CallGlobalProcByStrId(name: u4c, arg: []const ByondValue, result: *ByondValue) bool {
     const table = library.getTable();
-    return table.Byond_CallGlobalProcByStrId(name, arg, arg_count, result);
+    return table.Byond_CallGlobalProcByStrId(name, arg.ptr, @intCast(arg.len), result);
 }
 
 pub inline fn Byond_ToString(src: *const ByondValue, buf: ?[*]u8, buflen: *u4c) bool {

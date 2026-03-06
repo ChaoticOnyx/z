@@ -4,7 +4,25 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    const libws = b.createModule(.{
+        .root_source_file = b.path("src/libws.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = optimize != .Debug,
+    });
+
+    const libws_tests = b.addTest(.{
+        .root_module = libws,
+    });
+
+    const libws_tests_run = b.addRunArtifact(libws_tests);
+    const libws_tests_step = b.step("libws-test", "Run the libws tests");
+
+    libws_tests_step.dependOn(&libws_tests_run.step);
 
     createLib(b, optimize);
 }
@@ -38,6 +56,10 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
             .{ .name = "mcu_sdk", .module = mcu_sdk.module("mcu_sdk") },
         },
     });
+
+    if (target.result.os.tag == .windows) {
+        mod.linkSystemLibrary("Ws2_32", .{});
+    }
 
     mod.addIncludePath(b.path("src/"));
 
