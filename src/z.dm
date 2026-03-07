@@ -41,6 +41,10 @@ var/__z_name = null
 
 // WebSocket
 
+// Callback signatures:
+//   ON_TEXT_PROC(content: string, address: string, connection_index: number)
+//   ON_BINARY_PROC(content: list, address: string, connection_index: number)
+//   ON_DISCONNECT_PROC()
 // Inside of the ON_TEXT_PROC and ON_BINARY_PROC you can return any falsy value
 // to disconnect the connection. But you should not try to disconnect any other connections
 // during the callback call.
@@ -61,8 +65,8 @@ var/__z_name = null
 /// - max_handshake_size = 8192
 /// - rate_limit_messages_per_sec = 100
 /// - rate_limit_bytes_per_sec = 1 * 1024 * 1024
-/// - log = false
-/// Returns false if the server was failed to start.
+/// - log = false (0/1)
+/// Returns false if the server failed to start (see Z_ERROR_ALREADY_RUNNING, Z_ERROR_FAILED_TO_START).
 #define Z_WS_START(PORT, ON_TEXT_PROC, ON_BINARY_PROC, CFG) call_ext(__z_name, "byond:Z_ws_start")(PORT, ON_TEXT_PROC, ON_BINARY_PROC, CFG)
 
 /// Sends a content to the connection by id.
@@ -86,8 +90,8 @@ var/__z_name = null
 /// Do not call this inside of ON_*_PROC callbacks.
 #define Z_WS_DISCONNECT(IDX) call_ext(__z_name, "byond:Z_ws_disconnect")(IDX)
 
-/// Returns false if the server was not running.
-/// Returns null on error.
+/// Returns true if tick succeeded, false if the server was not running.
+/// Returns null on error (e.g., out of memory, see Z_ERROR_OUT_OF_MEMORY).
 #define Z_WS_TICK(...) call_ext(__z_name, "byond:Z_ws_tick")()
 
 /// Returns a port the WebSocket server is running on.
