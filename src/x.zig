@@ -506,7 +506,7 @@ pub inline fn False() ByondValue {
     return num(0);
 }
 
-pub inline fn toString(allocator: std.mem.Allocator, v: *const ByondValue) ![]u8 {
+pub inline fn toString(allocator: std.mem.Allocator, v: *const ByondValue) ![:0]u8 {
     var buflen: u4c = 0;
 
     if (!Byond_ToString(v, null, &buflen) and buflen == 0) {

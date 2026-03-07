@@ -322,6 +322,7 @@ pub const Connection = struct {
     fragment_opcode: ?Opcode = null,
     config: Config,
     time_provider: TimeProvider,
+    userdata: ?*anyopaque = null,
 
     // Timing
     handshake_start_time: i64 = 0,
@@ -1122,7 +1123,7 @@ pub const Server = struct {
         Unexpected,
     };
 
-    pub fn init(
+    pub inline fn init(
         listener: Listener,
         config: Connection.Config,
         time_provider: TimeProvider,

@@ -43,6 +43,7 @@ inline fn dumpStackTrace(stack_trace: std.builtin.StackTrace, writer: *std.Io.Wr
 
 fn panicFn(msg: []const u8, rt: ?usize) noreturn {
     std.log.err("Panic: {s}", .{msg});
+    @breakpoint();
 
     var buffer: [4096]u8 = undefined;
 

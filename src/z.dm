@@ -41,9 +41,9 @@ var/__z_name = null
 
 // WebSocket
 
-#define Z_WS_CODE_OK 0
-/// If returned from a WS callback proc then the connection will be closed.
-#define Z_WS_CODE_CLOSE 1
+// Inside of the ON_TEXT_PROC and ON_BINARY_PROC you can return any falsy value
+// to disconnect the connection. But you should not try to disconnect any other connections
+// during the callback call.
 
 /// PORT - the port to listen on, 0 for a random port.
 /// ON_TEXT_PROC - the callback to call when a text message received, may be null.
@@ -66,8 +66,24 @@ var/__z_name = null
 
 /// Sends a content to the connection by id.
 /// Pass a string to send a text message, or a list to send a binary message.
-/// Return false if failed to send, or the connection not found, or the server is not running.
+/// Returns false if failed to send, or the connection not found, or the server is not running.
 #define Z_WS_SEND(IDX, CONTENT) call_ext(__z_name, "byond:Z_ws_send")(IDX, CONTENT)
+
+/// Ties the OBJ object with the connection.
+/// Returns false if the connection not found, or if the connection is already tied, or the server is not running.
+#define Z_WS_TIE(IDX, OBJ, ON_TEXT_PROC, ON_BINARY_PROC, ON_DISCONNECT_PROC) call_ext(__z_name, "byond:Z_ws_tie")(IDX, OBJ, ON_TEXT_PROC, ON_BINARY_PROC, ON_DISCONNECT_PROC)
+
+/// Returns a connection id tied to the OBJ, or null if the object is not tied.
+#define Z_WS_GET_TIED(OBJ) call_ext(__z_name, "byond:Z_ws_get_tied")(OBJ)
+
+/// Unties the connection with the tied object.
+/// Returns false if the connection was not tied, or the connection not found, or the server is not running.
+#define Z_WS_UNTIE(IDX) call_ext(__z_name, "byond:Z_ws_untie")(IDX)
+
+/// Disconnects the connection.
+/// Returns false if the connection was not found, or the server is not running.
+/// Do not call this inside of ON_*_PROC callbacks.
+#define Z_WS_DISCONNECT(IDX) call_ext(__z_name, "byond:Z_ws_disconnect")(IDX)
 
 /// Returns false if the server was not running.
 /// Returns null on error.
