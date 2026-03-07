@@ -25,8 +25,11 @@ const WsConfig = struct {
     max_frame_size: usize = 1 * 1024 * 1024,
     max_handshake_size: usize = 8192,
 
-    rate_limit_messages_per_sec: u32 = 100,
+    rate_limit_messages_per_sec: u32 = 25,
     rate_limit_bytes_per_sec: usize = 1 * 1024 * 1024,
+
+    initial_message_timeout_ms: i64 = 5_000,
+    afk_timeout_ms: i64 = 0,
 
     log: u8 = 0,
 };
@@ -45,6 +48,8 @@ const ConnectionMeta = struct {
     on_text_proc: ?u32 = null,
     on_binary_proc: ?u32 = null,
     on_disconnect_proc: ?u32 = null,
+    connected_at: i64 = 0,
+    last_message_at: i64 = 0,
 
     pub inline fn deinit(this: *ConnectionMeta) void {
         if (this.src) |src| {
@@ -63,6 +68,9 @@ const Server = struct {
     on_binary_proc: ?u32,
     log: bool,
     is_processing: bool = false,
+
+    initial_message_timeout_ms: i64,
+    afk_timeout_ms: i64,
 
     pub inline fn init(
         allocator: std.mem.Allocator,
@@ -109,10 +117,14 @@ const Server = struct {
             .on_text_proc = on_text_proc,
             .on_binary_proc = on_binary_proc,
             .log = config.log != 0,
+            .initial_message_timeout_ms = config.initial_message_timeout_ms,
+            .afk_timeout_ms = config.afk_timeout_ms,
         };
     }
 
     pub inline fn tick(this: *Server, allocator: std.mem.Allocator) WsTickError!void {
+        const now = std.time.milliTimestamp();
+
         // Accept new connections
         while (true) {
             var conn = this.server.acceptConnection(allocator) catch |err| {
@@ -136,7 +148,9 @@ const Server = struct {
 
                 return WsTickError.OutOfMemory;
             };
-            meta.* = .{};
+            meta.* = .{
+                .connected_at = now,
+            };
 
             conn.userdata = meta;
             this.connections.append(allocator, conn) catch {
@@ -191,6 +205,8 @@ const Server = struct {
 
                 switch (msg.opcode) {
                     .text => {
+                        meta.last_message_at = now;
+
                         if (this.log) {
                             if (conn.getRemoteAddress()) |addr| {
                                 var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
@@ -255,6 +271,8 @@ const Server = struct {
                         }
                     },
                     .binary => {
+                        meta.last_message_at = now;
+
                         if (this.log) {
                             if (conn.getRemoteAddress()) |addr| {
                                 var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
@@ -338,7 +356,39 @@ const Server = struct {
                 }
             }
 
-            if (i < this.connections.items.len) {
+            if (!removed) {
+                if (meta.last_message_at == 0) {
+                    // No text/binary message received yet — check initial timeout
+                    if (this.initial_message_timeout_ms > 0 and
+                        now - meta.connected_at > this.initial_message_timeout_ms)
+                    {
+                        if (this.log) {
+                            std.log.info("Connection {} dropped: no initial message within {}ms", .{
+                                i, this.initial_message_timeout_ms,
+                            });
+                        }
+
+                        this.removeConnection(allocator, i);
+                        removed = true;
+                    }
+                } else {
+                    // Had messages before — check AFK timeout
+                    if (this.afk_timeout_ms > 0 and
+                        now - meta.last_message_at > this.afk_timeout_ms)
+                    {
+                        if (this.log) {
+                            std.log.info("Connection {} dropped: AFK for over {}ms", .{
+                                i, this.afk_timeout_ms,
+                            });
+                        }
+
+                        this.removeConnection(allocator, i);
+                        removed = true;
+                    }
+                }
+            }
+
+            if (!removed) {
                 i += 1;
             }
         }
