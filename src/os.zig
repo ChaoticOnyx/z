@@ -308,6 +308,49 @@ pub const Address = struct {
     inline fn fromBigEndian16(val: u16) u16 {
         return std.mem.bigToNative(u16, val);
     }
+
+    pub inline fn parseIp(str: []const u8) ?[4]u8 {
+        var octets: [4]u8 = undefined;
+        var octet_index: usize = 0;
+        var current: u16 = 0;
+        var has_digit = false;
+
+        for (str) |ch| {
+            if (ch == '.') {
+                if (!has_digit or octet_index >= 3) return null;
+                if (current > 255) return null;
+                octets[octet_index] = @intCast(current);
+                octet_index += 1;
+                current = 0;
+                has_digit = false;
+            } else if (ch >= '0' and ch <= '9') {
+                current = current * 10 + (ch - '0');
+                has_digit = true;
+            } else {
+                return null;
+            }
+        }
+
+        if (!has_digit or octet_index != 3) {
+            return null;
+        }
+
+        if (current > 255) {
+            return null;
+        }
+
+        octets[3] = @intCast(current);
+
+        return octets;
+    }
+
+    pub inline fn fromIpString(str: []const u8, port: u16) ?Address {
+        const ip = parseIp(str) orelse {
+            return null;
+        };
+
+        return .init(ip, port);
+    }
 };
 
 pub const TcpStream = struct {

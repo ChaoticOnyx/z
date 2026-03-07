@@ -469,16 +469,42 @@ pub const Connection = struct {
         const header_end = headers_end.?;
         const request = this.read_buffer.items[0 .. header_end + 4];
 
-        const accept_key = this.parseAndValidateHandshake(request) catch |err| {
+        const result = this.parseAndValidateHandshake(request) catch |err| {
             this.sendHttpError(400, "Bad Request") catch {};
             this.state = .closed;
 
             return err;
         };
 
-        this.sendHandshakeResponse(&accept_key) catch |err| {
-            this.state = .closed;
+        if (result.real_ip) |real_ip| {
+            const port = if (this.remote_address) |addr|
+                addr.getPort()
+            else
+                0;
 
+            if (this.tracker) |tracker| {
+                const old_ip = if (this.remote_address) |addr|
+                    addr.getIp()
+                else
+                    [4]u8{ 0, 0, 0, 0 };
+
+                tracker.release(allocator, old_ip);
+                tracker.tryAcquire(allocator, real_ip) catch |track_err| {
+                    this.state = .closed;
+                    this.sendHttpError(429, "Too Many Connections") catch {};
+
+                    return switch (track_err) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => error.ConnectionClosed,
+                    };
+                };
+            }
+
+            this.remote_address = os.Address.init(real_ip, port);
+        }
+
+        this.sendHandshakeResponse(&result.accept_key) catch |err| {
+            this.state = .closed;
             return err;
         };
 
@@ -502,15 +528,28 @@ pub const Connection = struct {
         }
     }
 
-    fn parseAndValidateHandshake(_: *Connection, request: []const u8) HandshakeError![28]u8 {
+    const HandshakeResult = struct {
+        accept_key: [28]u8,
+        real_ip: ?[4]u8,
+    };
+
+    fn parseAndValidateHandshake(_: *Connection, request: []const u8) HandshakeError!HandshakeResult {
         var lines = std.mem.splitSequence(u8, request, "\r\n");
         const request_line = lines.first();
 
         var parts = std.mem.splitScalar(u8, request_line, ' ');
 
-        const method = parts.next() orelse return error.InvalidRequest;
-        _ = parts.next() orelse return error.InvalidRequest;
-        const version = parts.next() orelse return error.InvalidRequest;
+        const method = parts.next() orelse {
+            return error.InvalidRequest;
+        };
+
+        _ = parts.next() orelse {
+            return error.InvalidRequest;
+        };
+
+        const version = parts.next() orelse {
+            return error.InvalidRequest;
+        };
 
         if (!std.mem.eql(u8, method, "GET")) {
             return error.InvalidMethod;
@@ -524,6 +563,7 @@ pub const Connection = struct {
         var connection_upgrade = false;
         var sec_websocket_key: ?[]const u8 = null;
         var sec_websocket_version: ?[]const u8 = null;
+        var real_ip: ?[4]u8 = null;
 
         while (lines.next()) |line| {
             if (line.len == 0) {
@@ -557,6 +597,8 @@ pub const Connection = struct {
                 sec_websocket_key = header_value;
             } else if (std.ascii.eqlIgnoreCase(header_name, "Sec-WebSocket-Version")) {
                 sec_websocket_version = header_value;
+            } else if (std.ascii.eqlIgnoreCase(header_name, "X-Real-IP")) {
+                real_ip = os.Address.parseIp(header_value);
             }
         }
 
@@ -587,13 +629,15 @@ pub const Connection = struct {
         var hasher = std.crypto.hash.Sha1.init(.{});
         hasher.update(key);
         hasher.update(WEBSOCKET_GUID);
-
         const hash = hasher.finalResult();
 
         var accept_key: [28]u8 = undefined;
         _ = std.base64.standard.Encoder.encode(&accept_key, &hash);
 
-        return accept_key;
+        return .{
+            .accept_key = accept_key,
+            .real_ip = real_ip,
+        };
     }
 
     inline fn sendHandshakeResponse(this: *Connection, accept_key: *const [28]u8) HandshakeError!void {
@@ -2774,4 +2818,221 @@ test "connection - remote address from stream" {
     try std.testing.expect(addr != null);
     try std.testing.expectEqual([4]u8{ 192, 168, 1, 100 }, addr.?.getIp());
     try std.testing.expectEqual(@as(u16, 8080), addr.?.getPort());
+}
+
+test "parseIp - valid addresses" {
+    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, os.Address.parseIp("192.168.1.1").?);
+    try std.testing.expectEqual([4]u8{ 0, 0, 0, 0 }, os.Address.parseIp("0.0.0.0").?);
+    try std.testing.expectEqual([4]u8{ 255, 255, 255, 255 }, os.Address.parseIp("255.255.255.255").?);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, os.Address.parseIp("10.0.0.1").?);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, os.Address.parseIp("127.0.0.1").?);
+    try std.testing.expectEqual([4]u8{ 1, 2, 3, 4 }, os.Address.parseIp("1.2.3.4").?);
+}
+
+test "parseIp - invalid addresses" {
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp(""));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1.2.3"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1.2.3.4.5"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("256.0.0.1"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1.2.3.999"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("abc.def.ghi.jkl"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1.2.3."));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp(".1.2.3"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1..2.3"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1.2.3.4:8080"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("192.168.1"));
+    try std.testing.expectEqual(@as(?[4]u8, null), os.Address.parseIp("1234"));
+}
+
+test "fromIpString - valid" {
+    const addr = os.Address.fromIpString("85.12.34.56", 3508).?;
+    try std.testing.expectEqual([4]u8{ 85, 12, 34, 56 }, addr.getIp());
+    try std.testing.expectEqual(@as(u16, 3508), addr.getPort());
+}
+
+test "fromIpString - invalid returns null" {
+    try std.testing.expectEqual(@as(?os.Address, null), os.Address.fromIpString("not.an.ip.x", 80));
+}
+
+inline fn buildHandshakeRequestWithRealIp(comptime key: []const u8, comptime real_ip: []const u8) []const u8 {
+    return "GET /chat HTTP/1.1\r\n" ++
+        "Host: localhost:8080\r\n" ++
+        "Upgrade: websocket\r\n" ++
+        "Connection: Upgrade\r\n" ++
+        "Sec-WebSocket-Key: " ++ key ++ "\r\n" ++
+        "Sec-WebSocket-Version: 13\r\n" ++
+        "X-Real-IP: " ++ real_ip ++ "\r\n" ++
+        "\r\n";
+}
+
+test "handshake - X-Real-IP updates remote address" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var mock = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, 9999);
+    defer mock.deinit();
+
+    try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "85.12.34.56"));
+
+    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    defer conn.deinit(allocator);
+
+    // Before handshake: socket address (127.0.0.1)
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, conn.getRemoteAddress().?.getIp());
+
+    try conn.performHandshake(allocator);
+
+    // After handshake: real client IP from header
+    const addr = conn.getRemoteAddress().?;
+    try std.testing.expectEqual([4]u8{ 85, 12, 34, 56 }, addr.getIp());
+    try std.testing.expectEqual(@as(u16, 9999), addr.getPort());
+}
+
+test "handshake - no X-Real-IP keeps original address" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var mock = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, 5555);
+    defer mock.deinit();
+
+    try mock.addInput(buildHandshakeRequest("dGhlIHNhbXBsZSBub25jZQ=="));
+
+    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    defer conn.deinit(allocator);
+
+    try conn.performHandshake(allocator);
+
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, conn.getRemoteAddress().?.getIp());
+}
+
+test "handshake - invalid X-Real-IP keeps original address" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var mock = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, 5555);
+    defer mock.deinit();
+
+    try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "not-an-ip"));
+
+    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    defer conn.deinit(allocator);
+
+    try conn.performHandshake(allocator);
+
+    // Should keep original since header was invalid
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, conn.getRemoteAddress().?.getIp());
+}
+
+test "handshake - X-Real-IP re-registers in tracker" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var listener = MockListener.init();
+    defer listener.deinit(allocator);
+
+    // Socket address is 127.0.0.1, but X-Real-IP will be 85.12.34.56
+    var mock = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, 1234);
+    defer mock.deinit();
+
+    try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "85.12.34.56"));
+    try listener.enqueueConnection(allocator, mock.interface());
+
+    var server = Server.init(
+        listener.interface(),
+        .{},
+        time.interface(),
+        ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 5 }),
+    );
+    defer server.deinit(allocator);
+
+    var conn = try server.acceptConnection(allocator);
+    defer conn.deinit(allocator);
+
+    // Before handshake: tracked under 127.0.0.1
+    try std.testing.expectEqual(@as(u8, 1), server.tracker.getConnectionCountFromIp(.{ 127, 0, 0, 1 }));
+    try std.testing.expectEqual(@as(u8, 0), server.tracker.getConnectionCountFromIp(.{ 85, 12, 34, 56 }));
+
+    try conn.performHandshake(allocator);
+
+    // After handshake: moved to real IP
+    try std.testing.expectEqual(@as(u8, 0), server.tracker.getConnectionCountFromIp(.{ 127, 0, 0, 1 }));
+    try std.testing.expectEqual(@as(u8, 1), server.tracker.getConnectionCountFromIp(.{ 85, 12, 34, 56 }));
+}
+
+test "handshake - X-Real-IP tracker releases on deinit" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var listener = MockListener.init();
+    defer listener.deinit(allocator);
+
+    var mock = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, 1234);
+    defer mock.deinit();
+
+    try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "10.20.30.40"));
+    try listener.enqueueConnection(allocator, mock.interface());
+
+    var server = Server.init(
+        listener.interface(),
+        .{},
+        time.interface(),
+        ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 5 }),
+    );
+    defer server.deinit(allocator);
+
+    {
+        var conn = try server.acceptConnection(allocator);
+        try conn.performHandshake(allocator);
+        conn.deinit(allocator);
+    }
+
+    // After deinit: real IP slot freed
+    try std.testing.expectEqual(@as(u8, 0), server.tracker.getConnectionCountFromIp(.{ 10, 20, 30, 40 }));
+    try std.testing.expectEqual(@as(u32, 0), server.getConnectionCount());
+}
+
+test "handshake - X-Real-IP per-ip limit enforced on real IP" {
+    const allocator = std.testing.allocator;
+
+    var time = MockTimeProvider{};
+    var listener = MockListener.init();
+    defer listener.deinit(allocator);
+
+    const real_ip = "192.168.50.1";
+    const real_ip_bytes = [4]u8{ 192, 168, 50, 1 };
+
+    // Create 3 connections all from 127.0.0.1 but with same X-Real-IP
+    var mocks: [3]MockStream = undefined;
+    for (0..3) |i| {
+        mocks[i] = MockStream.initWithAddress(allocator, .{ 127, 0, 0, 1 }, @intCast(1234 + i));
+        try mocks[i].addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", real_ip));
+        try listener.enqueueConnection(allocator, mocks[i].interface());
+    }
+    defer for (&mocks) |*m| m.deinit();
+
+    var server = Server.init(
+        listener.interface(),
+        .{},
+        time.interface(),
+        ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 2 }),
+    );
+    defer server.deinit(allocator);
+
+    var conn1 = try server.acceptConnection(allocator);
+    defer conn1.deinit(allocator);
+    try conn1.performHandshake(allocator);
+
+    var conn2 = try server.acceptConnection(allocator);
+    defer conn2.deinit(allocator);
+    try conn2.performHandshake(allocator);
+
+    try std.testing.expectEqual(@as(u8, 2), server.tracker.getConnectionCountFromIp(real_ip_bytes));
+
+    // Third connection: accept succeeds (127.0.0.1 has slots) but handshake should fail
+    // because X-Real-IP re-registration will hit the per-ip limit
+    var conn3 = try server.acceptConnection(allocator);
+    defer conn3.deinit(allocator);
+
+    try std.testing.expectError(error.ConnectionClosed, conn3.performHandshake(allocator));
+    try std.testing.expectEqual(.closed, conn3.state);
 }
