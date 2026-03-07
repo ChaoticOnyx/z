@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const crypto = @import("crypto.zig");
 const logger = @import("logger.zig");
 const machines = @import("machines.zig");
 const os = @import("os.zig");
@@ -149,6 +150,7 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnT
 }
 
 comptime {
+    _ = crypto;
     _ = machines;
     _ = ws;
 }

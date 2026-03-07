@@ -484,14 +484,14 @@ pub inline fn Byond_CRASH(str: [:0]const u8) void {
     table.Byond_CRASH(str);
 }
 
-pub inline fn NumF(v: f32) ByondValue {
+pub inline fn numF(v: f32) ByondValue {
     var value: ByondValue = .{};
     ByondValue_SetNum(&value, v);
 
     return value;
 }
 
-pub inline fn Num(v: u32) ByondValue {
+pub inline fn num(v: u32) ByondValue {
     var value: ByondValue = .{};
     ByondValue_SetNum(&value, @floatFromInt(v));
 
@@ -499,9 +499,26 @@ pub inline fn Num(v: u32) ByondValue {
 }
 
 pub inline fn True() ByondValue {
-    return Num(1);
+    return num(1);
 }
 
 pub inline fn False() ByondValue {
-    return Num(0);
+    return num(0);
+}
+
+pub inline fn toString(allocator: std.mem.Allocator, v: *const ByondValue) ![]u8 {
+    var buflen: u4c = 0;
+
+    if (!Byond_ToString(v, null, &buflen) and buflen == 0) {
+        return error.ToStringFailed;
+    }
+
+    const buf = try allocator.allocSentinel(u8, buflen, 0);
+    errdefer allocator.free(buf);
+
+    if (!Byond_ToString(v, buf.ptr, &buflen)) {
+        return error.ToStringFailed;
+    }
+
+    return buf;
 }

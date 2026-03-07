@@ -58,7 +58,7 @@ const Tts = struct {
         say = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@intFromEnum(this));
+            return x.num(@intFromEnum(this));
         }
     };
 
@@ -121,7 +121,7 @@ const Tts = struct {
                         var byond_msg: x.ByondValue = .{};
                         x.ByondValue_SetStr(&byond_msg, msg);
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.say.byond(), byond_msg, x.Num(@intFromEnum(this.mmio._config.language)) });
+                        return machine.tryCallSyscallProc(&.{ x.num(slot), NativeCommand.say.byond(), byond_msg, x.num(@intFromEnum(this.mmio._config.language)) });
                     },
                     @offsetOf(sdk.Tts.Action, "ack") => {
                         this.mmio._status.last_event = .{};
@@ -216,7 +216,7 @@ const SerialTerminal = struct {
         write = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@intFromEnum(this));
+            return x.num(@intFromEnum(this));
         }
     };
 
@@ -293,12 +293,12 @@ const SerialTerminal = struct {
                         }
 
                         for (0..len) |idx| {
-                            if (!x.Byond_WriteListIndex(&byond_bytes, &x.Num(idx + 1), &x.Num(this.output[idx]))) {
+                            if (!x.Byond_WriteListIndex(&byond_bytes, &x.num(idx + 1), &x.num(this.output[idx]))) {
                                 std.log.err("Failed to write an output byte from Serial Terminal at {}", .{idx});
                             }
                         }
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.write.byond(), byond_bytes });
+                        return machine.tryCallSyscallProc(&.{ x.num(slot), NativeCommand.write.byond(), byond_bytes });
                     },
                     @offsetOf(sdk.SerialTerminal.Action, "ack") => {
                         this.mmio._status.last_event = .{};
@@ -392,7 +392,7 @@ const SerialTerminal = struct {
                 for (0..bytes_len) |i| {
                     var byond_byte: x.ByondValue = .{};
 
-                    if (!x.Byond_ReadListIndex(bytes, &x.Num(i + 1), &byond_byte)) {
+                    if (!x.Byond_ReadListIndex(bytes, &x.num(i + 1), &byond_byte)) {
                         this.input[i] = 0;
                         bytes_len = i;
 
@@ -445,7 +445,7 @@ const Signaler = struct {
         send = 2,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@intFromEnum(this));
+            return x.num(@intFromEnum(this));
         }
     };
 
@@ -495,10 +495,10 @@ const Signaler = struct {
                         }
 
                         return machine.tryCallSyscallProc(&.{
-                            x.Num(slot),
+                            x.num(slot),
                             NativeCommand.set.byond(),
-                            x.Num(this.mmio._config.frequency),
-                            x.Num(this.mmio._config.code),
+                            x.num(this.mmio._config.frequency),
+                            x.num(this.mmio._config.code),
                         });
                     },
                     @offsetOf(sdk.Signaler.Action, "send") => {
@@ -506,7 +506,7 @@ const Signaler = struct {
                             return false;
                         }
 
-                        return machine.tryCallSyscallProc(&.{ x.Num(slot), NativeCommand.send.byond() });
+                        return machine.tryCallSyscallProc(&.{ x.num(slot), NativeCommand.send.byond() });
                     },
                     @offsetOf(sdk.Signaler.Action, "ack") => {
                         this.mmio._status.last_event = .{ .ty = .none };
@@ -612,7 +612,7 @@ const Light = struct {
         set = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@intFromEnum(this));
+            return x.num(@intFromEnum(this));
         }
     };
 
@@ -670,10 +670,10 @@ const Light = struct {
                         x.ByondValue_SetStr(&byond_hex, &hex_buffer);
 
                         return machine.tryCallSyscallProc(&.{
-                            x.Num(slot),
+                            x.num(slot),
                             NativeCommand.set.byond(),
                             byond_hex,
-                            x.Num(this.mmio._config.brightness),
+                            x.num(this.mmio._config.brightness),
                         });
                     },
                     @offsetOf(sdk.Light.Action, "ack") => {
@@ -733,7 +733,7 @@ const EnvSensor = struct {
         update = 1,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
-            return x.Num(@intFromEnum(this));
+            return x.num(@intFromEnum(this));
         }
     };
 
@@ -783,7 +783,7 @@ const EnvSensor = struct {
                         }
 
                         return machine.tryCallSyscallProc(&.{
-                            x.Num(slot),
+                            x.num(slot),
                             NativeCommand.update.byond(),
                             if (this.mmio._config.rays.alpha) x.True() else x.False(),
                             if (this.mmio._config.rays.beta) x.True() else x.False(),
@@ -832,7 +832,7 @@ const EnvSensor = struct {
                     var cursor: usize = 1;
 
                     var byond_total_moles: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_total_moles)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_total_moles)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -842,7 +842,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.total_moles = @intFromFloat(x.ByondValue_GetNum(&byond_total_moles));
 
                     var byond_pressure: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_pressure)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_pressure)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -852,7 +852,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.pressure = @intFromFloat(x.ByondValue_GetNum(&byond_pressure));
 
                     var byond_temperature: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_temperature)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_temperature)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -862,7 +862,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.temperature = @intFromFloat(x.ByondValue_GetNum(&byond_temperature));
 
                     var byond_oxygen: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_oxygen)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_oxygen)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -872,7 +872,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.oxygen = @intFromFloat(x.ByondValue_GetNum(&byond_oxygen));
 
                     var byond_nitrogen: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_nitrogen)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_nitrogen)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -882,7 +882,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.nitrogen = @intFromFloat(x.ByondValue_GetNum(&byond_nitrogen));
 
                     var byond_carbon_dioxide: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_carbon_dioxide)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_carbon_dioxide)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -892,7 +892,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.carbon_dioxide = @intFromFloat(x.ByondValue_GetNum(&byond_carbon_dioxide));
 
                     var byond_hydrogen: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_hydrogen)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_hydrogen)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -902,7 +902,7 @@ const EnvSensor = struct {
                     this.mmio._status.atmos.hydrogen = @intFromFloat(x.ByondValue_GetNum(&byond_hydrogen));
 
                     var byond_plasma: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_atmos, &x.Num(cursor), &byond_plasma)) {
+                    if (!x.Byond_ReadListIndex(byond_atmos, &x.num(cursor), &byond_plasma)) {
                         std.log.err("Failed to read atmos list at index {}", .{cursor});
 
                         return x.False();
@@ -917,7 +917,7 @@ const EnvSensor = struct {
                     var cursor: usize = 1;
 
                     var byond_avg_activity: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_avg_activity)) {
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.num(cursor), &byond_avg_activity)) {
                         std.log.err("Failed to read radiation list at index {}", .{cursor});
 
                         return x.False();
@@ -927,7 +927,7 @@ const EnvSensor = struct {
                     this.mmio._status.radiation.avg_activity = @intFromFloat(x.ByondValue_GetNum(&byond_avg_activity));
 
                     var byond_avg_energy: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_avg_energy)) {
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.num(cursor), &byond_avg_energy)) {
                         std.log.err("Failed to read radiation list at index {}", .{cursor});
 
                         return x.False();
@@ -937,7 +937,7 @@ const EnvSensor = struct {
                     this.mmio._status.radiation.avg_energy = @intFromFloat(x.ByondValue_GetNum(&byond_avg_energy));
 
                     var byond_dose: x.ByondValue = .{};
-                    if (!x.Byond_ReadListIndex(byond_radiation, &x.Num(cursor), &byond_dose)) {
+                    if (!x.Byond_ReadListIndex(byond_radiation, &x.num(cursor), &byond_dose)) {
                         std.log.err("Failed to read radiation list at index {}", .{cursor});
 
                         return x.False();
@@ -1211,7 +1211,7 @@ const Machine = struct {
         const proc = this.post_tick_proc orelse return;
 
         var ret: x.ByondValue = .{};
-        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{x.Num(delta_us)}, &ret);
+        _ = x.Byond_CallProcByStrId(&this.src, proc, &.{x.num(delta_us)}, &ret);
     }
 
     pub inline fn tryCallTrapProc(this: *const Machine) void {
@@ -2022,7 +2022,7 @@ pub const State = struct {
         }
 
         for (0..len) |idx| {
-            if (!x.Byond_WriteListIndex(dst, &x.Num(idx + 1), &x.Num(machine.cpu.ram[address + idx]))) {
+            if (!x.Byond_WriteListIndex(dst, &x.num(idx + 1), &x.num(machine.cpu.ram[address + idx]))) {
                 z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
@@ -2055,7 +2055,7 @@ pub const State = struct {
         for (0..len) |idx| {
             var byond_value: x.ByondValue = .{};
 
-            if (!x.Byond_ReadListIndex(src, &x.Num(idx + 1), &byond_value)) {
+            if (!x.Byond_ReadListIndex(src, &x.num(idx + 1), &byond_value)) {
                 z.getState().last_error = @errorName(MachineReadRamError.OutOfBounds);
 
                 return MachineReadRamError.OutOfBounds;
@@ -2519,7 +2519,7 @@ pub export fn Z_machine_create(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c)
         return z.returnCast(.{});
     };
 
-    return z.returnCast(x.Num(id));
+    return z.returnCast(x.num(id));
 }
 
 pub export fn Z_machine_reset(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -2577,7 +2577,7 @@ pub export fn Z_machine_get_ram_size(argc: x.u4c, argv: [*c]x.ByondValue) callco
         return z.returnCast(.{});
     };
 
-    return z.returnCast(x.Num(size));
+    return z.returnCast(x.num(size));
 }
 
 pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -2597,7 +2597,7 @@ pub export fn Z_machine_read_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callc
         return z.returnCast(.{});
     };
 
-    return z.returnCast(x.Num(value));
+    return z.returnCast(x.num(value));
 }
 
 pub export fn Z_machine_write_ram_byte(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -2731,7 +2731,7 @@ pub export fn Z_machine_get_state(argc: x.u4c, argv: [*c]x.ByondValue) callconv(
         return z.returnCast(x.False());
     };
 
-    return z.returnCast(x.Num(@intFromEnum(machine_state)));
+    return z.returnCast(x.num(@intFromEnum(machine_state)));
 }
 
 pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -2750,7 +2750,7 @@ pub export fn Z_machine_get_utilization(argc: x.u4c, argv: [*c]x.ByondValue) cal
         return z.returnCast(x.False());
     };
 
-    return z.returnCast(x.NumF(utilization));
+    return z.returnCast(x.numF(utilization));
 }
 
 pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -2770,7 +2770,7 @@ pub export fn Z_machine_get_executed(argc: x.u4c, argv: [*c]x.ByondValue) callco
     };
     const executed_32: u32 = @truncate(executed);
 
-    return z.returnCast(x.Num(executed_32));
+    return z.returnCast(x.num(executed_32));
 }
 
 pub export fn Z_machine_set_sensors(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
@@ -3061,7 +3061,7 @@ pub export fn Z_machine_try_attach_pci(argc: x.u4c, argv: [*c]x.ByondValue) call
         return z.returnCast(.{});
     }
 
-    return z.returnCast(x.Num(pci_slot.?));
+    return z.returnCast(x.num(pci_slot.?));
 }
 
 pub export fn Z_machine_try_detach_pci(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {

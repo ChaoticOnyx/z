@@ -74,11 +74,11 @@ var/__z_name = null
 #define Z_WS_TICK(...) call_ext(__z_name, "byond:Z_ws_tick")()
 
 /// Returns a port the WebSocket server is running on.
-/// Returns null if the WebSocker server is not running.
+/// Returns null if the WebSocket server is not running.
 #define Z_WS_GET_PORT(...) call_ext(__z_name, "byond:Z_ws_get_port")()
 
 /// Returns connections count.
-/// Returns null if the WebSocker server is not running.
+/// Returns null if the WebSocket server is not running.
 #define Z_WS_CONNECTIONS(...) call_ext(__z_name, "byond:Z_ws_connections")()
 
 /// Stops the WebSocket server. Returns true if the server was running.
@@ -210,3 +210,12 @@ var/__z_name = null
 /// Sets the max percentage of delta time the emulator may use (10-80).
 /// Lower = more time for game logic, higher = faster emulation.
 #define Z_MACHINES_SET_BUDGET(PERCENT) call_ext(__z_name, "byond:Z_machines_set_budget")(PERCENT)
+
+// Crypto
+
+/// Generates a LEN bytes and encodes them in url-safe base64 string without padding.
+#define Z_CRYPTO_RANDOM_BASE64(LEN) call_ext(__z_name, "byond:Z_crypto_random_base64")(LEN)
+
+/// Content and key must be a string.
+/// Returns a url-safe base64 string without padding.
+#define Z_CRYPTO_HMAC_SHA256(CONTENT, KEY) call_ext(__z_name, "byond:Z_crypto_hmac_sha256")(CONTENT, KEY)

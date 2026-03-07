@@ -163,7 +163,7 @@ const Server = struct {
                         x.ByondValue_SetStr(&byond_addr, addr[0 .. writer.end - 1 :0]);
 
                         var ret: x.ByondValue = .{};
-                        if (!x.Byond_CallGlobalProcByStrId(this.on_text_proc.?, &.{ content, byond_addr, x.Num(i) }, &ret)) {
+                        if (!x.Byond_CallGlobalProcByStrId(this.on_text_proc.?, &.{ content, byond_addr, x.num(i) }, &ret)) {
                             std.log.err("Failed to call on_text_proc callback", .{});
 
                             conn.deinit(allocator);
@@ -202,7 +202,7 @@ const Server = struct {
                         }
 
                         for (msg.payload, 0..) |byte, idx| {
-                            if (!x.Byond_WriteListIndex(&content, &x.Num(idx + 1), &x.Num(byte))) {
+                            if (!x.Byond_WriteListIndex(&content, &x.num(idx + 1), &x.num(byte))) {
                                 std.log.err("Failed to write a byte from a WebSocket message into list at {}", .{msg.payload.len});
 
                                 conn.deinit(allocator);
@@ -222,7 +222,7 @@ const Server = struct {
                         x.ByondValue_SetStr(&byond_addr, addr[0 .. writer.end - 1 :0]);
 
                         var ret: x.ByondValue = .{};
-                        if (!x.Byond_CallGlobalProcByStrId(this.on_binary_proc.?, &.{ content, byond_addr, x.Num(i) }, &ret)) {
+                        if (!x.Byond_CallGlobalProcByStrId(this.on_binary_proc.?, &.{ content, byond_addr, x.num(i) }, &ret)) {
                             std.log.err("Failed to call on_binary_proc callback", .{});
 
                             conn.deinit(allocator);
@@ -521,7 +521,7 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
         for (0..len) |i| {
             var byond_value: x.ByondValue = .{};
 
-            if (!x.Byond_ReadListIndex(byond_content, &x.Num(i + 1), &byond_value)) {
+            if (!x.Byond_ReadListIndex(byond_content, &x.num(i + 1), &byond_value)) {
                 std.log.err("Failed to read a value from the content argument at index {}", .{i});
 
                 return z.returnCast(.{});
@@ -557,7 +557,7 @@ pub export fn Z_ws_get_port(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
         return z.returnCast(.{});
     };
 
-    return z.returnCast(x.Num(port));
+    return z.returnCast(x.num(port));
 }
 
 pub export fn Z_ws_connections(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
@@ -577,7 +577,7 @@ pub export fn Z_ws_connections(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType
 
     const count = state.server.?.connections.items.len;
 
-    return z.returnCast(x.Num(@truncate(count)));
+    return z.returnCast(x.num(@truncate(count)));
 }
 
 pub export fn Z_ws_stop(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
