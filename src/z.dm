@@ -61,6 +61,7 @@ var/__z_name = null
 /// - max_handshake_size = 8192
 /// - rate_limit_messages_per_sec = 100
 /// - rate_limit_bytes_per_sec = 1 * 1024 * 1024
+/// - log = false
 /// Returns false if the server was failed to start.
 #define Z_WS_START(PORT, ON_TEXT_PROC, ON_BINARY_PROC, CFG) call_ext(__z_name, "byond:Z_ws_start")(PORT, ON_TEXT_PROC, ON_BINARY_PROC, CFG)
 

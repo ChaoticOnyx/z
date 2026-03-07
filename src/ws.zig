@@ -27,6 +27,8 @@ const WsConfig = struct {
 
     rate_limit_messages_per_sec: u32 = 100,
     rate_limit_bytes_per_sec: usize = 1 * 1024 * 1024,
+
+    log: u8 = 0,
 };
 
 const WsStartError = error{
@@ -59,6 +61,7 @@ const Server = struct {
     connections: std.ArrayList(libws.Connection),
     on_text_proc: ?u32,
     on_binary_proc: ?u32,
+    log: bool,
     is_processing: bool = false,
 
     pub inline fn init(
@@ -105,6 +108,7 @@ const Server = struct {
             .connections = connections,
             .on_text_proc = on_text_proc,
             .on_binary_proc = on_binary_proc,
+            .log = config.log != 0,
         };
     }
 
@@ -187,6 +191,19 @@ const Server = struct {
 
                 switch (msg.opcode) {
                     .text => {
+                        if (this.log) {
+                            if (conn.getRemoteAddress()) |addr| {
+                                var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
+                                var writer: std.Io.Writer = .fixed(&address);
+
+                                addr.format(&writer) catch unreachable;
+
+                                std.log.info("ws text from {s}: {s}", .{ address[0..writer.end], msg.payload });
+                            } else {
+                                std.log.info("ws text from UNKNOWN: {s}", .{msg.payload});
+                            }
+                        }
+
                         const src = meta.src;
                         const proc = if (src != null)
                             meta.on_text_proc
@@ -194,6 +211,8 @@ const Server = struct {
                             this.on_text_proc;
 
                         if (proc == null) {
+                            this.removeConnection(allocator, i);
+                            removed = true;
                             continue :data_blk;
                         }
 
@@ -236,6 +255,19 @@ const Server = struct {
                         }
                     },
                     .binary => {
+                        if (this.log) {
+                            if (conn.getRemoteAddress()) |addr| {
+                                var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
+                                var writer: std.Io.Writer = .fixed(&address);
+
+                                addr.format(&writer) catch unreachable;
+
+                                std.log.info("ws binary from {s}: {x}", .{ address[0..writer.end], msg.payload });
+                            } else {
+                                std.log.info("ws binary from UNKNOWN: {x}", .{msg.payload});
+                            }
+                        }
+
                         const src = meta.src;
                         const proc = if (src != null)
                             meta.on_binary_proc
@@ -243,6 +275,8 @@ const Server = struct {
                             this.on_binary_proc;
 
                         if (proc == null) {
+                            this.removeConnection(allocator, i);
+                            removed = true;
                             continue :data_blk;
                         }
 
@@ -582,6 +616,19 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
             return z.returnCast(.{});
         }
 
+        if (state.server.?.log) {
+            if (conn.getRemoteAddress()) |addr| {
+                var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&address);
+
+                addr.format(&writer) catch unreachable;
+
+                std.log.info("ws text to {s}: {s}", .{ address[0..writer.end], buf });
+            } else {
+                std.log.info("ws text to UNKNOWN: {s}", .{buf});
+            }
+        }
+
         conn.sendText(buf) catch {
             return z.returnCast(x.False());
         };
@@ -615,6 +662,19 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
 
             const value: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_value));
             content[i] = @truncate(value);
+        }
+
+        if (state.server.?.log) {
+            if (conn.getRemoteAddress()) |addr| {
+                var address: [os.Address.MAX_STRING_LEN]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(&address);
+
+                addr.format(&writer) catch unreachable;
+
+                std.log.info("ws binary to {s}: {x}", .{ address[0..writer.end], content });
+            } else {
+                std.log.info("ws binary to UNKNOWN: {x}", .{content});
+            }
         }
 
         conn.sendBinary(content) catch {
