@@ -100,6 +100,9 @@ var/__z_name = null
 /// Returns null if the WebSocket server is not running.
 #define Z_WS_GET_PORT(...) call_ext(__z_name, "byond:Z_ws_get_port")()
 
+/// Returns the duration of the last tick in ms.
+#define Z_WS_GET_TICK_TIME(...) call_ext(__z_name, "byond:Z_ws_get_tick_time")()
+
 /// Returns connections count.
 /// Returns null if the WebSocket server is not running.
 #define Z_WS_CONNECTIONS(...) call_ext(__z_name, "byond:Z_ws_connections")()

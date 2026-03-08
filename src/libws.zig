@@ -39,7 +39,7 @@ pub const ConnectionTracker = struct {
         const ip_key = ipToKey(ip);
         const current_from_ip = this.ip_connections.get(ip_key) orelse 0;
 
-        if (current_from_ip >= this.config.max_connections_per_ip) {
+        if (this.config.max_connections_per_ip > 0 and current_from_ip >= this.config.max_connections_per_ip) {
             return error.TooManyConnectionsFromIp;
         }
 

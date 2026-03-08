@@ -71,6 +71,7 @@ const Server = struct {
 
     initial_message_timeout_ms: i64,
     afk_timeout_ms: i64,
+    tick_time_ms: i64 = 0,
 
     pub inline fn init(
         allocator: std.mem.Allocator,
@@ -392,6 +393,8 @@ const Server = struct {
                 i += 1;
             }
         }
+
+        this.tick_time_ms = std.time.milliTimestamp() - now;
     }
 
     pub inline fn removeConnection(this: *Server, allocator: std.mem.Allocator, idx: usize) void {
@@ -986,6 +989,26 @@ pub export fn Z_ws_get_port(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
     };
 
     return z.returnCast(x.num(port));
+}
+
+pub export fn Z_ws_get_tick_time(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
+    _ = argv;
+
+    if (argc != 0) {
+        x.Byond_CRASH("Z_ws_get_tick_time does not accept args");
+
+        return z.returnCast(.{});
+    }
+
+    const state = getState();
+
+    if (state.server == null) {
+        return z.returnCast(.{});
+    }
+
+    const tick_time_ms: u64 = @bitCast(state.server.?.tick_time_ms);
+
+    return z.returnCast(x.num(@truncate(tick_time_ms)));
 }
 
 pub export fn Z_ws_connections(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
