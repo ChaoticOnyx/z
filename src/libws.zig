@@ -234,6 +234,7 @@ pub const CloseCode = enum(u16) {
         if (code >= 5000) {
             return false;
         }
+
         return true;
     }
 
@@ -312,12 +313,15 @@ pub const FrameError = error{
 pub const SendError = error{
     InvalidState,
     PayloadTooLarge,
+    WriteBufferFull,
 } || Stream.WriteError;
 
 pub const Connection = struct {
     stream: Stream,
     state: State = .connecting,
     read_buffer: std.ArrayList(u8) = .empty,
+    write_buffer: std.ArrayList(u8) = .empty,
+    write_pos: usize = 0,
     fragment_buffer: std.ArrayList(u8) = .empty,
     fragment_opcode: ?Opcode = null,
     config: Config,
@@ -340,6 +344,9 @@ pub const Connection = struct {
     tracker: ?*ConnectionTracker = null,
     remote_address: ?os.Address,
 
+    // Frame parsing state (for resumable parsing)
+    frame_state: FrameParseState = .{},
+
     const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     pub const State = enum {
@@ -357,6 +364,28 @@ pub const Connection = struct {
         }
     };
 
+    const FrameParseState = struct {
+        phase: Phase = .header,
+        fin: bool = false,
+        opcode: Opcode = .continuation,
+        payload_len: u64 = 0,
+        mask_key: [4]u8 = undefined,
+        payload: ?[:0]u8 = null,
+        payload_read: usize = 0,
+
+        const Phase = enum {
+            header,
+            extended_len_16,
+            extended_len_64,
+            mask,
+            payload,
+        };
+
+        fn reset(this: *FrameParseState) void {
+            this.* = .{};
+        }
+    };
+
     pub const Config = struct {
         handshake_timeout_ms: i64 = 5_000,
         idle_timeout_ms: i64 = 300_000,
@@ -366,9 +395,12 @@ pub const Connection = struct {
         max_message_size: usize = 1 * 1024 * 1024,
         max_frame_size: usize = 1 * 1024 * 1024,
         max_handshake_size: usize = 8192,
+        max_write_buffer_size: usize = 64 * 1024,
 
         rate_limit_messages_per_sec: u32 = 100,
         rate_limit_bytes_per_sec: usize = 1 * 1024 * 1024,
+
+        trust_x_real_ip: bool = false,
     };
 
     pub inline fn init(
@@ -416,10 +448,42 @@ pub const Connection = struct {
             this.tracker = null;
         }
 
+        if (this.frame_state.payload) |payload| {
+            allocator.free(payload);
+            this.frame_state.payload = null;
+        }
+
         this.read_buffer.deinit(allocator);
+        this.write_buffer.deinit(allocator);
         this.fragment_buffer.deinit(allocator);
         this.stream.deinit(allocator);
         this.state = .closed;
+    }
+
+    /// Flushes pending write buffer. Returns true if all data was sent.
+    /// Call this when socket becomes writable after WouldBlock.
+    pub fn flushWrites(this: *Connection) Stream.WriteError!bool {
+        while (this.write_pos < this.write_buffer.items.len) {
+            const n = this.stream.write(this.write_buffer.items[this.write_pos..]) catch |err| {
+                if (err == error.WouldBlock) {
+                    return false;
+                }
+
+                return err;
+            };
+
+            this.write_pos += n;
+        }
+
+        this.write_buffer.clearRetainingCapacity();
+        this.write_pos = 0;
+
+        return true;
+    }
+
+    /// Returns true if there's pending data to write
+    pub inline fn hasPendingWrites(this: *const Connection) bool {
+        return this.write_pos < this.write_buffer.items.len;
     }
 
     pub fn performHandshake(this: *Connection, allocator: std.mem.Allocator) HandshakeError!void {
@@ -427,7 +491,27 @@ pub const Connection = struct {
             return error.InvalidState;
         }
 
-        var headers_end: ?usize = null;
+        // First, try to flush any pending writes (handshake response from previous call)
+        if (this.hasPendingWrites()) {
+            const flushed = this.flushWrites() catch |err| {
+                this.state = .closed;
+
+                return err;
+            };
+
+            if (!flushed) {
+                return error.WouldBlock;
+            }
+
+            // Response was fully sent, handshake complete
+            this.state = .open;
+            this.last_activity_time = this.time_provider.milliTimestamp();
+
+            return;
+        }
+
+        // Check for headers end in existing buffer
+        var headers_end = std.mem.indexOf(u8, this.read_buffer.items, "\r\n\r\n");
 
         while (headers_end == null) {
             const now = this.time_provider.milliTimestamp();
@@ -438,8 +522,13 @@ pub const Connection = struct {
                 return error.HandshakeTimeout;
             }
 
+            // Try to read more data
             var buf: [1024]u8 = undefined;
             const n = this.stream.read(&buf) catch |err| {
+                if (err == error.WouldBlock) {
+                    return error.WouldBlock;
+                }
+
                 this.state = .closed;
 
                 return err;
@@ -470,7 +559,7 @@ pub const Connection = struct {
         const request = this.read_buffer.items[0 .. header_end + 4];
 
         const result = this.parseAndValidateHandshake(request) catch |err| {
-            this.sendHttpError(400, "Bad Request") catch {};
+            this.sendHttpError(allocator, 400, "Bad Request") catch {};
             this.state = .closed;
 
             return err;
@@ -491,7 +580,7 @@ pub const Connection = struct {
                 tracker.release(allocator, old_ip);
                 tracker.tryAcquire(allocator, real_ip) catch |track_err| {
                     this.state = .closed;
-                    this.sendHttpError(429, "Too Many Connections") catch {};
+                    this.sendHttpError(allocator, 429, "Too Many Connections") catch {};
 
                     return switch (track_err) {
                         error.OutOfMemory => error.OutOfMemory,
@@ -503,13 +592,11 @@ pub const Connection = struct {
             this.remote_address = os.Address.init(real_ip, port);
         }
 
-        this.sendHandshakeResponse(&result.accept_key) catch |err| {
+        // Queue handshake response
+        this.queueHandshakeResponse(allocator, &result.accept_key) catch |err| {
             this.state = .closed;
             return err;
         };
-
-        this.state = .open;
-        this.last_activity_time = this.time_provider.milliTimestamp();
 
         // Keep any data after headers for frame parsing
         const remaining_start = header_end + 4;
@@ -526,6 +613,21 @@ pub const Connection = struct {
         } else {
             this.read_buffer.clearRetainingCapacity();
         }
+
+        // Try to flush immediately
+        const flushed = this.flushWrites() catch |err| {
+            this.state = .closed;
+
+            return err;
+        };
+
+        if (!flushed) {
+            // Response not fully sent, will complete on next call
+            return error.WouldBlock;
+        }
+
+        this.state = .open;
+        this.last_activity_time = this.time_provider.milliTimestamp();
     }
 
     const HandshakeResult = struct {
@@ -533,7 +635,7 @@ pub const Connection = struct {
         real_ip: ?[4]u8,
     };
 
-    fn parseAndValidateHandshake(_: *Connection, request: []const u8) HandshakeError!HandshakeResult {
+    fn parseAndValidateHandshake(this: *Connection, request: []const u8) HandshakeError!HandshakeResult {
         var lines = std.mem.splitSequence(u8, request, "\r\n");
         const request_line = lines.first();
 
@@ -598,6 +700,10 @@ pub const Connection = struct {
             } else if (std.ascii.eqlIgnoreCase(header_name, "Sec-WebSocket-Version")) {
                 sec_websocket_version = header_value;
             } else if (std.ascii.eqlIgnoreCase(header_name, "X-Real-IP")) {
+                if (!this.config.trust_x_real_ip) {
+                    return error.InvalidRequest;
+                }
+
                 real_ip = os.Address.parseIp(header_value);
             }
         }
@@ -640,25 +746,54 @@ pub const Connection = struct {
         };
     }
 
-    inline fn sendHandshakeResponse(this: *Connection, accept_key: *const [28]u8) HandshakeError!void {
+    fn queueHandshakeResponse(this: *Connection, allocator: std.mem.Allocator, accept_key: *const [28]u8) !void {
         const response =
             "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Upgrade: websocket\r\n" ++
             "Connection: Upgrade\r\n" ++
             "Sec-WebSocket-Accept: ";
 
-        try this.stream.writeAll(response);
-        try this.stream.writeAll(accept_key);
-        try this.stream.writeAll("\r\n\r\n");
+        try this.write_buffer.appendSlice(allocator, response);
+        try this.write_buffer.appendSlice(allocator, accept_key);
+        try this.write_buffer.appendSlice(allocator, "\r\n\r\n");
     }
 
-    inline fn sendHttpError(this: *Connection, code: u16, message: []const u8) !void {
+    fn sendHttpError(this: *Connection, allocator: std.mem.Allocator, code: u16, message: []const u8) !void {
         var buf: [256]u8 = undefined;
-        const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ code, message }) catch {
-            return;
-        };
+        const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ code, message }) catch return;
 
-        _ = this.stream.write(response) catch {};
+        try this.write_buffer.appendSlice(allocator, response);
+        _ = this.flushWrites() catch {};
+    }
+
+    /// Reads data from socket into read_buffer until we have at least `needed` bytes
+    fn ensureReadBuffer(this: *Connection, allocator: std.mem.Allocator, needed: usize) FrameError!void {
+        while (this.read_buffer.items.len < needed) {
+            var buf: [4096]u8 = undefined;
+            const n = this.stream.read(&buf) catch |err| {
+                return err;
+            };
+
+            if (n == 0) {
+                return error.ConnectionClosed;
+            }
+
+            try this.read_buffer.appendSlice(allocator, buf[0..n]);
+        }
+    }
+
+    /// Consumes n bytes from the front of read_buffer
+    fn consumeReadBuffer(this: *Connection, n: usize) void {
+        const remaining = this.read_buffer.items.len - n;
+
+        if (remaining > 0) {
+            @memmove(
+                this.read_buffer.items[0..remaining],
+                this.read_buffer.items[n..],
+            );
+        }
+
+        this.read_buffer.shrinkRetainingCapacity(remaining);
     }
 
     pub fn readMessage(this: *Connection, allocator: std.mem.Allocator) FrameError!Message {
@@ -667,12 +802,11 @@ pub const Connection = struct {
         }
 
         while (true) {
-            // Check timeouts
             try this.checkTimeouts();
 
             const frame = this.readFrame(allocator) catch |err| {
-                // Send appropriate close code for protocol errors
                 switch (err) {
+                    error.WouldBlock => return error.WouldBlock,
                     error.UnmaskedClientFrame,
                     error.InvalidOpcode,
                     error.ReservedBitsSet,
@@ -682,22 +816,22 @@ pub const Connection = struct {
                     error.UnexpectedContinuation,
                     error.ExpectedContinuation,
                     => {
-                        this.closeWithError(.protocol_error, "Protocol error") catch {};
+                        this.closeWithError(allocator, .protocol_error, "Protocol error") catch {};
 
                         return err;
                     },
                     error.MessageTooLarge => {
-                        this.closeWithError(.message_too_big, "Message too large") catch {};
+                        this.closeWithError(allocator, .message_too_big, "Message too large") catch {};
 
                         return err;
                     },
                     error.InvalidUtf8 => {
-                        this.closeWithError(.invalid_payload, "Invalid UTF-8") catch {};
+                        this.closeWithError(allocator, .invalid_payload, "Invalid UTF-8") catch {};
 
                         return err;
                     },
                     error.RateLimitExceeded => {
-                        this.closeWithError(.policy_violation, "Rate limit exceeded") catch {};
+                        this.closeWithError(allocator, .policy_violation, "Rate limit exceeded") catch {};
 
                         return err;
                     },
@@ -709,7 +843,7 @@ pub const Connection = struct {
 
             switch (frame.opcode) {
                 .ping => {
-                    this.sendPong(frame.payload) catch {};
+                    this.sendPong(allocator, frame.payload) catch {};
                     allocator.free(frame.payload);
                 },
                 .pong => {
@@ -722,14 +856,14 @@ pub const Connection = struct {
                 .continuation => {
                     if (this.fragment_opcode == null) {
                         allocator.free(frame.payload);
-                        this.closeWithError(.protocol_error, "Unexpected continuation") catch {};
+                        this.closeWithError(allocator, .protocol_error, "Unexpected continuation") catch {};
 
                         return error.UnexpectedContinuation;
                     }
 
                     if (this.fragment_buffer.items.len +| frame.payload.len > this.config.max_message_size) {
                         allocator.free(frame.payload);
-                        this.closeWithError(.message_too_big, "Message too large") catch {};
+                        this.closeWithError(allocator, .message_too_big, "Message too large") catch {};
 
                         return error.MessageTooLarge;
                     }
@@ -739,7 +873,6 @@ pub const Connection = struct {
 
                         return err;
                     };
-
                     allocator.free(frame.payload);
 
                     if (frame.fin) {
@@ -749,7 +882,7 @@ pub const Connection = struct {
                         if (opcode == .text) {
                             if (!std.unicode.utf8ValidateSlice(this.fragment_buffer.items)) {
                                 this.fragment_buffer.clearRetainingCapacity();
-                                this.closeWithError(.invalid_payload, "Invalid UTF-8") catch {};
+                                this.closeWithError(allocator, .invalid_payload, "Invalid UTF-8") catch {};
 
                                 return error.InvalidUtf8;
                             }
@@ -764,7 +897,7 @@ pub const Connection = struct {
                 .text, .binary => {
                     if (this.fragment_opcode != null) {
                         allocator.free(frame.payload);
-                        this.closeWithError(.protocol_error, "Expected continuation") catch {};
+                        this.closeWithError(allocator, .protocol_error, "Expected continuation") catch {};
 
                         return error.ExpectedContinuation;
                     }
@@ -773,7 +906,7 @@ pub const Connection = struct {
                         if (frame.opcode == .text) {
                             if (!std.unicode.utf8ValidateSlice(frame.payload)) {
                                 allocator.free(frame.payload);
-                                this.closeWithError(.invalid_payload, "Invalid UTF-8") catch {};
+                                this.closeWithError(allocator, .invalid_payload, "Invalid UTF-8") catch {};
 
                                 return error.InvalidUtf8;
                             }
@@ -786,20 +919,18 @@ pub const Connection = struct {
                     } else {
                         this.fragment_opcode = frame.opcode;
                         this.fragment_buffer.clearRetainingCapacity();
-
                         this.fragment_buffer.appendSlice(allocator, frame.payload) catch |err| {
                             allocator.free(frame.payload);
                             this.fragment_opcode = null;
 
                             return err;
                         };
-
                         allocator.free(frame.payload);
                     }
                 },
                 _ => {
                     allocator.free(frame.payload);
-                    this.closeWithError(.protocol_error, "Invalid opcode") catch {};
+                    this.closeWithError(allocator, .protocol_error, "Invalid opcode") catch {};
 
                     return error.InvalidOpcode;
                 },
@@ -817,7 +948,7 @@ pub const Connection = struct {
 
             if (!CloseCode.isValidReceived(code_value)) {
                 if (this.state == .open) {
-                    this.closeWithError(.protocol_error, "Invalid close code") catch {};
+                    this.closeWithError(allocator, .protocol_error, "Invalid close code") catch {};
                 }
 
                 this.state = .closed;
@@ -828,11 +959,10 @@ pub const Connection = struct {
             received_code = @enumFromInt(code_value);
         }
 
-        // Validate UTF-8 in close reason
         if (payload.len > 2) {
             if (!std.unicode.utf8ValidateSlice(payload[2..])) {
                 if (this.state == .open) {
-                    this.closeWithError(.invalid_payload, "Invalid UTF-8 in close reason") catch {};
+                    this.closeWithError(allocator, .invalid_payload, "Invalid UTF-8 in close reason") catch {};
                 }
 
                 this.state = .closed;
@@ -843,7 +973,7 @@ pub const Connection = struct {
 
         if (this.state == .open) {
             this.state = .closing;
-            this.sendCloseFrame(@intFromEnum(received_code), "") catch {};
+            this.sendCloseFrame(allocator, @intFromEnum(received_code), "") catch {};
         }
 
         this.state = .closed;
@@ -858,130 +988,189 @@ pub const Connection = struct {
     };
 
     fn readFrame(this: *Connection, allocator: std.mem.Allocator) FrameError!Frame {
-        // Check rate limit before reading
         try this.checkRateLimit(0);
 
-        var header: [2]u8 = undefined;
-        try this.readExact(&header);
+        // State machine for frame parsing
+        while (true) {
+            switch (this.frame_state.phase) {
+                .header => {
+                    try this.ensureReadBuffer(allocator, 2);
 
-        const fin = (header[0] & 0x80) != 0;
-        const rsv = header[0] & 0x70;
-        const opcode: Opcode = @enumFromInt(header[0] & 0x0F);
-        const masked = (header[1] & 0x80) != 0;
-        var payload_len: u64 = header[1] & 0x7F;
+                    const header = this.read_buffer.items[0..2];
+                    this.frame_state.fin = (header[0] & 0x80) != 0;
+                    const rsv = header[0] & 0x70;
+                    this.frame_state.opcode = @enumFromInt(header[0] & 0x0F);
+                    const masked = (header[1] & 0x80) != 0;
+                    const len7 = header[1] & 0x7F;
 
-        if (rsv != 0) {
-            return error.ReservedBitsSet;
-        }
+                    if (rsv != 0) {
+                        this.frame_state.reset();
 
-        if (!opcode.isValid()) {
-            return error.InvalidOpcode;
-        }
+                        return error.ReservedBitsSet;
+                    }
 
-        if (!masked) {
-            return error.UnmaskedClientFrame;
-        }
+                    if (!this.frame_state.opcode.isValid()) {
+                        this.frame_state.reset();
 
-        if (opcode.isControl()) {
-            if (!fin) {
-                return error.FragmentedControlFrame;
+                        return error.InvalidOpcode;
+                    }
+
+                    if (!masked) {
+                        this.frame_state.reset();
+
+                        return error.UnmaskedClientFrame;
+                    }
+
+                    if (this.frame_state.opcode.isControl()) {
+                        if (!this.frame_state.fin) {
+                            this.frame_state.reset();
+
+                            return error.FragmentedControlFrame;
+                        }
+                        if (len7 > 125) {
+                            this.frame_state.reset();
+
+                            return error.InvalidControlFrameLength;
+                        }
+                    }
+
+                    this.consumeReadBuffer(2);
+
+                    if (len7 < 126) {
+                        this.frame_state.payload_len = len7;
+                        this.frame_state.phase = .mask;
+                    } else if (len7 == 126) {
+                        this.frame_state.phase = .extended_len_16;
+                    } else {
+                        this.frame_state.phase = .extended_len_64;
+                    }
+                },
+
+                .extended_len_16 => {
+                    try this.ensureReadBuffer(allocator, 2);
+
+                    this.frame_state.payload_len = std.mem.readInt(u16, this.read_buffer.items[0..2], .big);
+                    this.consumeReadBuffer(2);
+                    this.frame_state.phase = .mask;
+                },
+
+                .extended_len_64 => {
+                    try this.ensureReadBuffer(allocator, 8);
+
+                    this.frame_state.payload_len = std.mem.readInt(u64, this.read_buffer.items[0..8], .big);
+                    this.consumeReadBuffer(8);
+
+                    if (this.frame_state.payload_len >> 63 != 0) {
+                        this.frame_state.reset();
+
+                        return error.InvalidPayloadLength;
+                    }
+
+                    this.frame_state.phase = .mask;
+                },
+
+                .mask => {
+                    if (this.frame_state.payload_len > this.config.max_frame_size) {
+                        this.frame_state.reset();
+
+                        return error.MessageTooLarge;
+                    }
+
+                    if (!this.frame_state.opcode.isControl() and this.frame_state.fin and this.fragment_opcode == null) {
+                        if (this.frame_state.payload_len > this.config.max_message_size) {
+                            this.frame_state.reset();
+
+                            return error.MessageTooLarge;
+                        }
+                    }
+
+                    try this.checkRateLimit(this.frame_state.payload_len);
+                    try this.ensureReadBuffer(allocator, 4);
+
+                    @memcpy(&this.frame_state.mask_key, this.read_buffer.items[0..4]);
+                    this.consumeReadBuffer(4);
+
+                    // Allocate payload buffer
+                    this.frame_state.payload = try allocator.allocSentinel(u8, @intCast(this.frame_state.payload_len), 0);
+                    this.frame_state.payload_read = 0;
+                    this.frame_state.phase = .payload;
+                },
+
+                .payload => {
+                    const payload = this.frame_state.payload.?;
+                    const remaining = payload.len - this.frame_state.payload_read;
+
+                    if (remaining > 0) {
+                        // Try to read from buffer first
+                        const from_buffer = @min(remaining, this.read_buffer.items.len);
+                        if (from_buffer > 0) {
+                            @memcpy(
+                                payload[this.frame_state.payload_read..][0..from_buffer],
+                                this.read_buffer.items[0..from_buffer],
+                            );
+                            this.consumeReadBuffer(from_buffer);
+                            this.frame_state.payload_read += from_buffer;
+                        }
+
+                        // If still need more, try to read from socket
+                        const still_remaining = payload.len - this.frame_state.payload_read;
+                        if (still_remaining > 0) {
+                            const n = this.stream.read(payload[this.frame_state.payload_read..]) catch |err| {
+                                if (err == error.WouldBlock) {
+                                    return error.WouldBlock;
+                                }
+
+                                allocator.free(payload);
+                                this.frame_state.payload = null;
+                                this.frame_state.reset();
+
+                                return err;
+                            };
+
+                            if (n == 0) {
+                                allocator.free(payload);
+                                this.frame_state.payload = null;
+                                this.frame_state.reset();
+
+                                return error.ConnectionClosed;
+                            }
+
+                            this.frame_state.payload_read += n;
+                        }
+                    }
+
+                    // Check if we have all payload data
+                    if (this.frame_state.payload_read < payload.len) {
+                        continue;
+                    }
+
+                    // Unmask payload
+                    for (payload, 0..) |*byte, i| {
+                        byte.* ^= this.frame_state.mask_key[i % 4];
+                    }
+
+                    // Update rate limit counters
+                    this.messages_in_window += 1;
+                    this.bytes_in_window += payload.len;
+
+                    const frame = Frame{
+                        .fin = this.frame_state.fin,
+                        .opcode = this.frame_state.opcode,
+                        .payload = payload,
+                    };
+
+                    this.frame_state.payload = null;
+                    this.frame_state.reset();
+
+                    return frame;
+                },
             }
-
-            if (payload_len > 125) {
-                return error.InvalidControlFrameLength;
-            }
-        }
-
-        if (payload_len == 126) {
-            var len_buf: [2]u8 = undefined;
-            try this.readExact(&len_buf);
-
-            payload_len = std.mem.readInt(u16, &len_buf, .big);
-        } else if (payload_len == 127) {
-            var len_buf: [8]u8 = undefined;
-            try this.readExact(&len_buf);
-
-            payload_len = std.mem.readInt(u64, &len_buf, .big);
-
-            if (payload_len >> 63 != 0) {
-                return error.InvalidPayloadLength;
-            }
-        }
-
-        // Check frame size limit
-        if (payload_len > this.config.max_frame_size) {
-            return error.MessageTooLarge;
-        }
-
-        // Check message size limit for complete data frames
-        if (!opcode.isControl() and fin and this.fragment_opcode == null) {
-            if (payload_len > this.config.max_message_size) {
-                return error.MessageTooLarge;
-            }
-        }
-
-        // Check rate limit with payload size
-        try this.checkRateLimit(payload_len);
-
-        var mask_key: [4]u8 = undefined;
-        try this.readExact(&mask_key);
-
-        const payload = try allocator.allocSentinel(u8, @intCast(payload_len), 0);
-        errdefer allocator.free(payload);
-
-        try this.readExact(payload);
-
-        // Unmask payload
-        for (payload, 0..) |*byte, i| {
-            byte.* ^= mask_key[i % 4];
-        }
-
-        // Update rate limit counters
-        this.messages_in_window += 1;
-        this.bytes_in_window += payload.len;
-
-        return Frame{
-            .fin = fin,
-            .opcode = opcode,
-            .payload = payload,
-        };
-    }
-
-    fn readExact(this: *Connection, buf: []u8) FrameError!void {
-        var pos: usize = 0;
-
-        const from_buffer = @min(buf.len, this.read_buffer.items.len);
-
-        if (from_buffer > 0) {
-            @memcpy(buf[0..from_buffer], this.read_buffer.items[0..from_buffer]);
-            const remaining = this.read_buffer.items.len - from_buffer;
-
-            if (remaining > 0) {
-                @memmove(
-                    this.read_buffer.items[0..remaining],
-                    this.read_buffer.items[from_buffer..],
-                );
-            }
-
-            this.read_buffer.shrinkRetainingCapacity(remaining);
-            pos = from_buffer;
-        }
-
-        while (pos < buf.len) {
-            const n = try this.stream.read(buf[pos..]);
-
-            if (n == 0) {
-                return error.ConnectionClosed;
-            }
-
-            pos += n;
         }
     }
 
     inline fn checkRateLimit(this: *Connection, additional_bytes: u64) FrameError!void {
         const now = this.time_provider.milliTimestamp();
 
-        // Reset window every second
         if (now - this.rate_window_start >= 1000) {
             this.rate_window_start = now;
             this.messages_in_window = 0;
@@ -1000,53 +1189,51 @@ pub const Connection = struct {
     inline fn checkTimeouts(this: *Connection) FrameError!void {
         const now = this.time_provider.milliTimestamp();
 
-        // Check idle timeout
         if (now - this.last_activity_time > this.config.idle_timeout_ms) {
-            this.closeWithError(.going_away, "Idle timeout") catch {};
             return error.IdleTimeout;
         }
 
-        // Check pong timeout
         if (this.awaiting_pong) {
             if (now - this.last_ping_time > this.config.pong_timeout_ms) {
-                this.closeWithError(.going_away, "Pong timeout") catch {};
                 return error.PongTimeout;
             }
         }
     }
 
-    /// Should be called periodically to send pings and check timeouts
-    pub inline fn tick(this: *Connection) !void {
+    pub inline fn tick(this: *Connection, allocator: std.mem.Allocator) !void {
         if (this.state != .open) return;
+
+        // Flush pending writes
+        if (this.hasPendingWrites()) {
+            _ = try this.flushWrites();
+        }
 
         const now = this.time_provider.milliTimestamp();
 
-        // Send ping if needed
         if (!this.awaiting_pong and now - this.last_ping_time >= this.config.ping_interval_ms) {
-            try this.sendPing("");
-
+            try this.sendPing(allocator, "");
             this.last_ping_time = now;
             this.awaiting_pong = true;
         }
     }
 
-    pub inline fn sendText(this: *Connection, data: []const u8) SendError!void {
+    pub inline fn sendText(this: *Connection, allocator: std.mem.Allocator, data: []const u8) SendError!void {
         if (!this.state.canWrite()) {
             return error.InvalidState;
         }
 
-        try this.sendFrame(.text, data);
+        try this.queueFrame(allocator, .text, data);
     }
 
-    pub inline fn sendBinary(this: *Connection, data: []const u8) SendError!void {
+    pub inline fn sendBinary(this: *Connection, allocator: std.mem.Allocator, data: []const u8) SendError!void {
         if (!this.state.canWrite()) {
             return error.InvalidState;
         }
 
-        try this.sendFrame(.binary, data);
+        try this.queueFrame(allocator, .binary, data);
     }
 
-    pub inline fn sendPing(this: *Connection, data: []const u8) SendError!void {
+    pub inline fn sendPing(this: *Connection, allocator: std.mem.Allocator, data: []const u8) SendError!void {
         if (data.len > 125) {
             return error.PayloadTooLarge;
         }
@@ -1055,43 +1242,42 @@ pub const Connection = struct {
             return error.InvalidState;
         }
 
-        try this.sendFrame(.ping, data);
+        try this.queueFrame(allocator, .ping, data);
     }
 
-    pub inline fn sendPong(this: *Connection, data: []const u8) SendError!void {
+    pub inline fn sendPong(this: *Connection, allocator: std.mem.Allocator, data: []const u8) SendError!void {
         if (data.len > 125) {
             return error.PayloadTooLarge;
         }
 
-        // Pong can be sent during closing
         if (this.state == .closed) {
             return error.InvalidState;
         }
 
-        try this.sendFrame(.pong, data);
+        try this.queueFrame(allocator, .pong, data);
     }
 
-    pub inline fn sendClose(this: *Connection, code: CloseCode) SendError!void {
-        return this.sendCloseFrame(@intFromEnum(code), "");
+    pub inline fn sendClose(this: *Connection, allocator: std.mem.Allocator, code: CloseCode) SendError!void {
+        return this.sendCloseFrame(allocator, @intFromEnum(code), "");
     }
 
-    pub inline fn sendCloseWithReason(this: *Connection, code: CloseCode, reason: []const u8) SendError!void {
+    pub inline fn sendCloseWithReason(this: *Connection, allocator: std.mem.Allocator, code: CloseCode, reason: []const u8) SendError!void {
         if (reason.len > 123) {
             return error.PayloadTooLarge;
         }
 
-        return this.sendCloseFrame(@intFromEnum(code), reason);
+        return this.sendCloseFrame(allocator, @intFromEnum(code), reason);
     }
 
-    inline fn closeWithError(this: *Connection, code: CloseCode, reason: []const u8) SendError!void {
+    fn closeWithError(this: *Connection, allocator: std.mem.Allocator, code: CloseCode, reason: []const u8) SendError!void {
         if (this.state == .closed or this.close_code_sent != null) {
             return;
         }
 
-        try this.sendCloseFrame(@intFromEnum(code), reason);
+        try this.sendCloseFrame(allocator, @intFromEnum(code), reason);
     }
 
-    inline fn sendCloseFrame(this: *Connection, code: u16, reason: []const u8) SendError!void {
+    fn sendCloseFrame(this: *Connection, allocator: std.mem.Allocator, code: u16, reason: []const u8) SendError!void {
         if (this.state == .closed) {
             return error.InvalidState;
         }
@@ -1100,7 +1286,6 @@ pub const Connection = struct {
             return error.InvalidState;
         }
 
-        // Record that we're sending close
         this.close_code_sent = @enumFromInt(code);
 
         var payload: [125]u8 = undefined;
@@ -1109,16 +1294,26 @@ pub const Connection = struct {
         const reason_len: usize = @min(reason.len, 123);
         @memcpy(payload[2 .. 2 + reason_len], reason[0..reason_len]);
 
-        this.sendFrame(.close, payload[0 .. 2 + reason_len]) catch |err| {
+        this.queueFrame(allocator, .close, payload[0 .. 2 + reason_len]) catch |err| {
             this.state = .closing;
-
             return err;
         };
 
         this.state = .closing;
     }
 
-    inline fn sendFrame(this: *Connection, opcode: Opcode, payload: []const u8) Stream.WriteError!void {
+    fn queueFrame(this: *Connection, allocator: std.mem.Allocator, opcode: Opcode, payload: []const u8) !void {
+        const frame_size = if (payload.len < 126)
+            2 + payload.len
+        else if (payload.len <= 65535)
+            4 + payload.len
+        else
+            10 + payload.len;
+
+        if (this.write_buffer.items.len + frame_size > this.config.max_write_buffer_size) {
+            return error.WriteBufferFull;
+        }
+
         var header: [10]u8 = undefined;
         var header_len: usize = 2;
 
@@ -1129,19 +1324,17 @@ pub const Connection = struct {
         } else if (payload.len <= 65535) {
             header[1] = 126;
             std.mem.writeInt(u16, header[2..4], @intCast(payload.len), .big);
-
             header_len = 4;
         } else {
             header[1] = 127;
             std.mem.writeInt(u64, header[2..10], payload.len, .big);
-
             header_len = 10;
         }
 
-        try this.stream.writeAll(header[0..header_len]);
+        try this.write_buffer.appendSlice(allocator, header[0..header_len]);
 
         if (payload.len > 0) {
-            try this.stream.writeAll(payload);
+            try this.write_buffer.appendSlice(allocator, payload);
         }
     }
 
@@ -1192,15 +1385,14 @@ pub const Server = struct {
                 else => error.Unexpected,
             };
         };
+
         errdefer stream.deinit(allocator);
 
-        // Get remote IP for tracking
         const remote_ip = if (stream.getRemoteAddress()) |addr|
             addr.getIp()
         else
             [4]u8{ 0, 0, 0, 0 };
 
-        // Check connection limits
         this.tracker.tryAcquire(allocator, remote_ip) catch |err| {
             return switch (err) {
                 error.TooManyConnections => error.TooManyConnections,
@@ -1601,6 +1793,8 @@ test "frame - ping/pong automatic response" {
 
     try std.testing.expectEqualStrings("test", msg.payload);
 
+    _ = try conn.flushWrites();
+
     // Verify pong was sent
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x8A), frames[0]); // Pong opcode
@@ -1655,6 +1849,8 @@ test "frame - close handshake" {
     try std.testing.expectError(error.ConnectionClosed, conn.readMessage(allocator));
     try std.testing.expectEqual(.closed, conn.state);
 
+    _ = try conn.flushWrites();
+
     // Verify close was echoed
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x88), frames[0]);
@@ -1678,6 +1874,8 @@ test "frame - unmasked client frame → close 1002" {
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.UnmaskedClientFrame, conn.readMessage(allocator));
 
+    _ = try conn.flushWrites();
+
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1002), parseCloseCode(frames).?);
 }
@@ -1700,6 +1898,8 @@ test "frame - invalid UTF-8 in text → close 1007" {
 
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.InvalidUtf8, conn.readMessage(allocator));
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1007), parseCloseCode(frames).?);
@@ -1732,6 +1932,8 @@ test "frame - payload too large → close 1009" {
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.MessageTooLarge, conn.readMessage(allocator));
 
+    _ = try conn.flushWrites();
+
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1009), parseCloseCode(frames).?);
 }
@@ -1759,6 +1961,8 @@ test "frame - fragmented message exceeds max size → close 1009" {
 
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.MessageTooLarge, conn.readMessage(allocator));
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1009), parseCloseCode(frames).?);
@@ -1792,6 +1996,8 @@ test "rate limit - messages per second exceeded" {
 
     // 6th should fail
     try std.testing.expectError(error.RateLimitExceeded, conn.readMessage(allocator));
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     // Should have sent close 1008 (policy violation)
@@ -1877,7 +2083,7 @@ test "state - cannot send before handshake" {
     var conn = Connection.init(mock.interface(), .{}, time.interface());
     defer conn.deinit(allocator);
 
-    try std.testing.expectError(error.InvalidState, conn.sendText("hello"));
+    try std.testing.expectError(error.InvalidState, conn.sendText(allocator, "hello"));
 }
 
 test "state - cannot handshake twice" {
@@ -1905,10 +2111,10 @@ test "state - cannot send after close sent" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendClose(.normal_closure);
+    try conn.sendClose(allocator, .normal_closure);
 
     try std.testing.expectEqual(.closing, conn.state);
-    try std.testing.expectError(error.InvalidState, conn.sendText("hello"));
+    try std.testing.expectError(error.InvalidState, conn.sendText(allocator, "hello"));
 }
 
 test "server - accept connection" {
@@ -2029,7 +2235,9 @@ test "send text message" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendText("Hello from server!");
+    try conn.sendText(allocator, "Hello from server!");
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x81), frames[0]); // FIN + text
@@ -2048,7 +2256,9 @@ test "send binary message" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendBinary(&[_]u8{ 0x00, 0x01, 0xFF });
+    try conn.sendBinary(allocator, &[_]u8{ 0x00, 0x01, 0xFF });
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x82), frames[0]); // FIN + binary
@@ -2065,7 +2275,9 @@ test "send ping" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendPing("test");
+    try conn.sendPing(allocator, "test");
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x89), frames[0]); // FIN + ping
@@ -2084,7 +2296,7 @@ test "send - payload too large for control frame" {
     try conn.performHandshake(allocator);
 
     var large_payload: [126]u8 = undefined;
-    try std.testing.expectError(error.PayloadTooLarge, conn.sendPing(&large_payload));
+    try std.testing.expectError(error.PayloadTooLarge, conn.sendPing(allocator, &large_payload));
 }
 
 test "handshake - size limit exact boundary" {
@@ -2121,6 +2333,8 @@ test "frame - close code 1005 is invalid in frame" {
 
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.InvalidCloseCode, conn.readMessage(allocator));
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1002), parseCloseCode(frames).?);
@@ -2179,6 +2393,8 @@ test "frame - close code 4000 (private use) is valid" {
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.ConnectionClosed, conn.readMessage(allocator));
 
+    _ = try conn.flushWrites();
+
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 4000), parseCloseCode(frames).?);
 }
@@ -2204,6 +2420,8 @@ test "frame - close with invalid UTF-8 reason" {
 
     try conn.performHandshake(allocator);
     try std.testing.expectError(error.InvalidUtf8, conn.readMessage(allocator));
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u16, 1007), parseCloseCode(frames).?);
@@ -2239,9 +2457,9 @@ test "state - cannot send close twice" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendClose(.normal_closure);
+    try conn.sendClose(allocator, .normal_closure);
 
-    try std.testing.expectError(error.InvalidState, conn.sendClose(.going_away));
+    try std.testing.expectError(error.InvalidState, conn.sendClose(allocator, .going_away));
     try std.testing.expectEqual(CloseCode.normal_closure, conn.getCloseSentCode().?);
 }
 
@@ -2273,6 +2491,8 @@ test "frame - control frame interleaved with fragmented message" {
     defer msg.deinit(allocator);
 
     try std.testing.expectEqualStrings("Hello World", msg.payload);
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x8A), frames[0]);
@@ -2377,7 +2597,7 @@ test "timeout - pong timeout" {
     try conn.performHandshake(allocator);
 
     time.advance(1500);
-    try conn.tick();
+    try conn.tick(allocator);
     try std.testing.expect(conn.awaiting_pong);
 
     time.advance(2500);
@@ -2575,7 +2795,8 @@ test "tick - sends ping after interval" {
     try std.testing.expect(!conn.awaiting_pong);
 
     time.advance(1500);
-    try conn.tick();
+    try conn.tick(allocator);
+    _ = try conn.flushWrites();
 
     try std.testing.expect(conn.awaiting_pong);
 
@@ -2598,13 +2819,15 @@ test "tick - does not send ping if already awaiting pong" {
     mock.clearWritten();
 
     time.advance(1500);
-    try conn.tick();
+    try conn.tick(allocator);
+    _ = try conn.flushWrites();
 
     const first_write_len = mock.getWritten().len;
     mock.clearWritten();
 
     time.advance(1500);
-    try conn.tick();
+    try conn.tick(allocator);
+    _ = try conn.flushWrites();
 
     // Should not send another ping
     try std.testing.expectEqual(@as(usize, 0), mock.getWritten().len);
@@ -2627,7 +2850,7 @@ test "frame - pong resets awaiting_pong flag" {
     try conn.performHandshake(allocator);
 
     time.advance(1500);
-    try conn.tick();
+    try conn.tick(allocator);
     try std.testing.expect(conn.awaiting_pong);
 
     // Add pong and text message
@@ -2657,7 +2880,7 @@ test "tick - no action when not open" {
 
     // Still in connecting state
     time.advance(100000);
-    try conn.tick();
+    try conn.tick(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), mock.getWritten().len);
 }
@@ -2673,7 +2896,9 @@ test "send close with reason" {
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
-    try conn.sendCloseWithReason(.going_away, "server shutdown");
+    try conn.sendCloseWithReason(allocator, .going_away, "server shutdown");
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x88), frames[0]);
@@ -2700,7 +2925,7 @@ test "send close with reason too long" {
     var long_reason: [124]u8 = undefined;
     @memset(&long_reason, 'x');
 
-    try std.testing.expectError(error.PayloadTooLarge, conn.sendCloseWithReason(.normal_closure, &long_reason));
+    try std.testing.expectError(error.PayloadTooLarge, conn.sendCloseWithReason(allocator, .normal_closure, &long_reason));
 }
 
 test "frame - medium payload 126 length encoding" {
@@ -2744,7 +2969,9 @@ test "send - medium payload uses 126 encoding" {
 
     var payload: [200]u8 = undefined;
     @memset(&payload, 'Y');
-    try conn.sendText(&payload);
+    try conn.sendText(allocator, &payload);
+
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x81), frames[0]); // FIN + text
@@ -2760,7 +2987,9 @@ test "send - large payload uses 127 encoding" {
     var mock = try MockStream.initWithData(allocator, buildHandshakeRequest("dGhlIHNhbXBsZSBub25jZQ=="));
     defer mock.deinit();
 
-    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    var conn = Connection.init(mock.interface(), .{
+        .max_write_buffer_size = 70000 * 2,
+    }, time.interface());
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
@@ -2769,7 +2998,8 @@ test "send - large payload uses 127 encoding" {
     defer allocator.free(payload);
     @memset(payload, 'Z');
 
-    try conn.sendBinary(payload);
+    try conn.sendBinary(allocator, payload);
+    _ = try conn.flushWrites();
 
     const frames = findFrameAfterHandshake(mock.getWritten()).?;
     try std.testing.expectEqual(@as(u8, 0x82), frames[0]); // FIN + binary
@@ -2874,7 +3104,9 @@ test "handshake - X-Real-IP updates remote address" {
 
     try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "85.12.34.56"));
 
-    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    var conn = Connection.init(mock.interface(), .{
+        .trust_x_real_ip = true,
+    }, time.interface());
     defer conn.deinit(allocator);
 
     // Before handshake: socket address (127.0.0.1)
@@ -2897,7 +3129,9 @@ test "handshake - no X-Real-IP keeps original address" {
 
     try mock.addInput(buildHandshakeRequest("dGhlIHNhbXBsZSBub25jZQ=="));
 
-    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    var conn = Connection.init(mock.interface(), .{
+        .trust_x_real_ip = true,
+    }, time.interface());
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
@@ -2914,7 +3148,9 @@ test "handshake - invalid X-Real-IP keeps original address" {
 
     try mock.addInput(buildHandshakeRequestWithRealIp("dGhlIHNhbXBsZSBub25jZQ==", "not-an-ip"));
 
-    var conn = Connection.init(mock.interface(), .{}, time.interface());
+    var conn = Connection.init(mock.interface(), .{
+        .trust_x_real_ip = true,
+    }, time.interface());
     defer conn.deinit(allocator);
 
     try conn.performHandshake(allocator);
@@ -2939,7 +3175,9 @@ test "handshake - X-Real-IP re-registers in tracker" {
 
     var server = Server.init(
         listener.interface(),
-        .{},
+        .{
+            .trust_x_real_ip = true,
+        },
         time.interface(),
         ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 5 }),
     );
@@ -2974,7 +3212,9 @@ test "handshake - X-Real-IP tracker releases on deinit" {
 
     var server = Server.init(
         listener.interface(),
-        .{},
+        .{
+            .trust_x_real_ip = true,
+        },
         time.interface(),
         ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 5 }),
     );
@@ -3012,7 +3252,9 @@ test "handshake - X-Real-IP per-ip limit enforced on real IP" {
 
     var server = Server.init(
         listener.interface(),
-        .{},
+        .{
+            .trust_x_real_ip = true,
+        },
         time.interface(),
         ConnectionTracker.init(.{ .max_connections = 100, .max_connections_per_ip = 2 }),
     );

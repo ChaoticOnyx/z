@@ -24,12 +24,15 @@ const WsConfig = struct {
     max_message_size: usize = 1 * 1024 * 1024,
     max_frame_size: usize = 1 * 1024 * 1024,
     max_handshake_size: usize = 8192,
+    max_write_buffer_size: usize = 64 * 1024,
 
     rate_limit_messages_per_sec: u32 = 25,
     rate_limit_bytes_per_sec: usize = 1 * 1024 * 1024,
 
     initial_message_timeout_ms: i64 = 5_000,
     afk_timeout_ms: i64 = 0,
+
+    trust_x_real_ip: u8 = 0,
 
     log: u8 = 0,
 };
@@ -101,8 +104,10 @@ const Server = struct {
             .max_message_size = config.max_message_size,
             .max_frame_size = config.max_frame_size,
             .max_handshake_size = config.max_handshake_size,
+            .max_write_buffer_size = config.max_write_buffer_size,
             .rate_limit_messages_per_sec = config.rate_limit_messages_per_sec,
             .rate_limit_bytes_per_sec = config.rate_limit_bytes_per_sec,
+            .trust_x_real_ip = config.trust_x_real_ip != 0,
         };
         const tracker_config: libws.ConnectionTracker.Config = .{
             .max_connections = config.max_connections,
@@ -136,10 +141,12 @@ const Server = struct {
                 continue;
             };
 
-            conn.performHandshake(allocator) catch {
-                conn.deinit(allocator);
+            conn.performHandshake(allocator) catch |err| {
+                if (err != error.WouldBlock) {
+                    conn.deinit(allocator);
 
-                continue;
+                    continue;
+                }
             };
 
             const meta: *ConnectionMeta = allocator.create(ConnectionMeta) catch {
@@ -182,7 +189,28 @@ const Server = struct {
 
             const meta: *ConnectionMeta = @ptrCast(@alignCast(conn.userdata.?));
 
-            conn.tick() catch {
+            // Continue handshake for connecting state
+            if (conn.getState() == .connecting) {
+                conn.performHandshake(allocator) catch |err| {
+                    if (err == error.WouldBlock) {
+                        // Still waiting for data - check timeout
+                        if (now - meta.connected_at > this.server.config.handshake_timeout_ms) {
+                            this.removeConnection(allocator, i);
+
+                            continue;
+                        }
+                        i += 1;
+
+                        continue;
+                    }
+
+                    // Real error
+                    this.removeConnection(allocator, i);
+                    continue;
+                };
+            }
+
+            conn.tick(allocator) catch {
                 this.removeConnection(allocator, i);
 
                 continue;
@@ -358,33 +386,36 @@ const Server = struct {
             }
 
             if (!removed) {
-                if (meta.last_message_at == 0) {
-                    // No text/binary message received yet — check initial timeout
-                    if (this.initial_message_timeout_ms > 0 and
-                        now - meta.connected_at > this.initial_message_timeout_ms)
-                    {
-                        if (this.log) {
-                            std.log.info("Connection {} dropped: no initial message within {}ms", .{
-                                i, this.initial_message_timeout_ms,
-                            });
-                        }
+                // Only check timeouts for connections that completed handshake
+                if (conn.getState() == .open) {
+                    if (meta.last_message_at == 0) {
+                        // No text/binary message received yet — check initial timeout
+                        if (this.initial_message_timeout_ms > 0 and
+                            now - meta.connected_at > this.initial_message_timeout_ms)
+                        {
+                            if (this.log) {
+                                std.log.info("Connection {} dropped: no initial message within {}ms", .{
+                                    i, this.initial_message_timeout_ms,
+                                });
+                            }
 
-                        this.removeConnection(allocator, i);
-                        removed = true;
-                    }
-                } else {
-                    // Had messages before — check AFK timeout
-                    if (this.afk_timeout_ms > 0 and
-                        now - meta.last_message_at > this.afk_timeout_ms)
-                    {
-                        if (this.log) {
-                            std.log.info("Connection {} dropped: AFK for over {}ms", .{
-                                i, this.afk_timeout_ms,
-                            });
+                            this.removeConnection(allocator, i);
+                            removed = true;
                         }
+                    } else {
+                        // Had messages before — check AFK timeout
+                        if (this.afk_timeout_ms > 0 and
+                            now - meta.last_message_at > this.afk_timeout_ms)
+                        {
+                            if (this.log) {
+                                std.log.info("Connection {} dropped: AFK for over {}ms", .{
+                                    i, this.afk_timeout_ms,
+                                });
+                            }
 
-                        this.removeConnection(allocator, i);
-                        removed = true;
+                            this.removeConnection(allocator, i);
+                            removed = true;
+                        }
                     }
                 }
             }
@@ -682,7 +713,7 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
             }
         }
 
-        conn.sendText(buf) catch {
+        conn.sendText(state.allocator, buf) catch {
             return z.returnCast(x.False());
         };
 
@@ -730,7 +761,7 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
             }
         }
 
-        conn.sendBinary(content) catch {
+        conn.sendBinary(state.allocator, content) catch {
             return z.returnCast(x.False());
         };
 
