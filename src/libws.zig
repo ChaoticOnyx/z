@@ -462,7 +462,7 @@ pub const Connection = struct {
 
     /// Flushes pending write buffer. Returns true if all data was sent.
     /// Call this when socket becomes writable after WouldBlock.
-    pub fn flushWrites(this: *Connection) Stream.WriteError!bool {
+    pub inline fn flushWrites(this: *Connection) Stream.WriteError!bool {
         while (this.write_pos < this.write_buffer.items.len) {
             const n = this.stream.write(this.write_buffer.items[this.write_pos..]) catch |err| {
                 if (err == error.WouldBlock) {
@@ -595,6 +595,7 @@ pub const Connection = struct {
         // Queue handshake response
         this.queueHandshakeResponse(allocator, &result.accept_key) catch |err| {
             this.state = .closed;
+
             return err;
         };
 
@@ -746,7 +747,7 @@ pub const Connection = struct {
         };
     }
 
-    fn queueHandshakeResponse(this: *Connection, allocator: std.mem.Allocator, accept_key: *const [28]u8) !void {
+    inline fn queueHandshakeResponse(this: *Connection, allocator: std.mem.Allocator, accept_key: *const [28]u8) !void {
         const response =
             "HTTP/1.1 101 Switching Protocols\r\n" ++
             "Upgrade: websocket\r\n" ++
@@ -758,7 +759,7 @@ pub const Connection = struct {
         try this.write_buffer.appendSlice(allocator, "\r\n\r\n");
     }
 
-    fn sendHttpError(this: *Connection, allocator: std.mem.Allocator, code: u16, message: []const u8) !void {
+    inline fn sendHttpError(this: *Connection, allocator: std.mem.Allocator, code: u16, message: []const u8) !void {
         var buf: [256]u8 = undefined;
         const response = std.fmt.bufPrint(&buf, "HTTP/1.1 {d} {s}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ code, message }) catch return;
 
@@ -767,7 +768,7 @@ pub const Connection = struct {
     }
 
     /// Reads data from socket into read_buffer until we have at least `needed` bytes
-    fn ensureReadBuffer(this: *Connection, allocator: std.mem.Allocator, needed: usize) FrameError!void {
+    inline fn ensureReadBuffer(this: *Connection, allocator: std.mem.Allocator, needed: usize) FrameError!void {
         while (this.read_buffer.items.len < needed) {
             var buf: [4096]u8 = undefined;
             const n = this.stream.read(&buf) catch |err| {
@@ -783,7 +784,7 @@ pub const Connection = struct {
     }
 
     /// Consumes n bytes from the front of read_buffer
-    fn consumeReadBuffer(this: *Connection, n: usize) void {
+    inline fn consumeReadBuffer(this: *Connection, n: usize) void {
         const remaining = this.read_buffer.items.len - n;
 
         if (remaining > 0) {

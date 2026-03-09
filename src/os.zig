@@ -317,8 +317,14 @@ pub const Address = struct {
 
         for (str) |ch| {
             if (ch == '.') {
-                if (!has_digit or octet_index >= 3) return null;
-                if (current > 255) return null;
+                if (!has_digit or octet_index >= 3) {
+                    return null;
+                }
+
+                if (current > 255) {
+                    return null;
+                }
+
                 octets[octet_index] = @intCast(current);
                 octet_index += 1;
                 current = 0;
