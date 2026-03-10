@@ -164,7 +164,7 @@ const Library = struct {
             @panic("failed to open the dynamic library handle");
         };
 
-        this.table = undefined;
+        var table: Table = undefined;
 
         inline for (symbols) |sym| {
             const name: [:0]const u8 = sym[0];
@@ -174,8 +174,10 @@ const Library = struct {
                 std.debug.panic("Failed to load symbol '{s}'\n", .{name});
             };
 
-            @field(this.table.?, sym[0]) = @ptrCast(@alignCast(ptr));
+            @field(table, sym[0]) = @ptrCast(@alignCast(ptr));
         }
+
+        this.table = table;
     }
 };
 
@@ -513,7 +515,7 @@ pub inline fn toString(allocator: std.mem.Allocator, v: *const ByondValue) ![:0]
         return error.ToStringFailed;
     }
 
-    const buf = try allocator.allocSentinel(u8, buflen, 0);
+    const buf = try allocator.allocSentinel(u8, buflen - 1, 0);
     errdefer allocator.free(buf);
 
     if (!Byond_ToString(v, buf.ptr, &buflen)) {

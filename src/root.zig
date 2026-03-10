@@ -4,10 +4,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const options = @import("options");
+
 const crypto = @import("crypto.zig");
 const logger = @import("logger.zig");
 const machines = @import("machines.zig");
 const os = @import("os.zig");
+const tracy = @import("tracy.zig");
 const ws = @import("ws.zig");
 const x = @import("x.zig");
 
@@ -68,9 +71,15 @@ const State = struct {
     wsstate: ws.State,
     last_error: ?[:0]const u8 = null,
 
+    pub inline fn allocator(this: *State) std.mem.Allocator {
+        return this.alloc.allocator();
+    }
+
     pub inline fn deinit(this: *State) void {
         this.mstate.deinit();
         this.wsstate.deinit();
+
+        tracy.deinitGlobal();
 
         if (this.alloc.deinit() == .leak) {
             std.log.warn("Memory leaks detected", .{});
@@ -94,8 +103,20 @@ pub inline fn getState() *State {
             .wsstate = undefined,
         };
 
-        _state.?.mstate = .init(_state.?.alloc.allocator());
-        _state.?.wsstate = .init(_state.?.alloc.allocator());
+        _state.?.mstate = .init(_state.?.allocator());
+        _state.?.wsstate = .init(_state.?.allocator());
+
+        if (comptime options.profiler) {
+            tracy.initGlobal(_state.?.allocator()) catch |err| {
+                std.debug.panic("Failed to initialize Tracy: {t}", .{err});
+            };
+
+            tracy.getGlobal().?.setProgramName("Z");
+
+            tracy.getGlobal().?.start(8086) catch |err| {
+                std.debug.panic("Failed to start Tracy: {t}", .{err});
+            };
+        }
     }
 
     return &_state.?;

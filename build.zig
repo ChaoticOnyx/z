@@ -7,6 +7,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const profiler = b.option(bool, "profiler", "Enable profiler") orelse false;
+
     const libws = b.createModule(.{
         .root_source_file = b.path("src/libws.zig"),
         .target = target,
@@ -24,10 +26,10 @@ pub fn build(b: *std.Build) void {
 
     libws_tests_step.dependOn(&libws_tests_run.step);
 
-    createLib(b, optimize);
+    createLib(b, optimize, profiler);
 }
 
-fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.OptimizeMode, profiler: bool) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86,
         .os_tag = os,
@@ -45,6 +47,9 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .optimize = optimize,
     });
 
+    const options = b.addOptions();
+    options.addOption(bool, "profiler", profiler);
+
     const mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -54,6 +59,7 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .imports = &.{
             .{ .name = "ondatra", .module = ondatra.module("ondatra") },
             .{ .name = "mcu_sdk", .module = mcu_sdk.module("mcu_sdk") },
+            .{ .name = "options", .module = options.createModule() },
         },
     });
 
@@ -66,18 +72,18 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
     return mod;
 }
 
-fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode) void {
+fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode, profiler: bool) void {
     const windows_lib = b.addLibrary(.{
         .name = "libz",
         .linkage = .dynamic,
-        .root_module = createRootModule(b, .windows, optimize),
+        .root_module = createRootModule(b, .windows, optimize, profiler),
     });
     b.installArtifact(windows_lib);
 
     const linux_lib = b.addLibrary(.{
         .name = "libz",
         .linkage = .dynamic,
-        .root_module = createRootModule(b, .linux, optimize),
+        .root_module = createRootModule(b, .linux, optimize, profiler),
     });
     b.installArtifact(linux_lib);
 }

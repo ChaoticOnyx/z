@@ -5,6 +5,7 @@ const std = @import("std");
 
 const ondatra = @import("ondatra");
 const sdk = @import("mcu_sdk");
+const ztracy = @import("ztracy");
 
 const os = @import("os.zig");
 const x = @import("x.zig");
@@ -214,6 +215,7 @@ const Tts = struct {
 const SerialTerminal = struct {
     pub const NativeCommand = enum(u8) {
         write = 1,
+        set_raw_mode = 2,
 
         pub inline fn byond(this: NativeCommand) x.ByondValue {
             return x.num(@intFromEnum(this));
@@ -267,7 +269,20 @@ const SerialTerminal = struct {
                 const rel_offset = offset - @offsetOf(sdk.SerialTerminal, "_config");
                 const bytes = std.mem.asBytes(&this.mmio._config);
 
+                const old_raw_mode = this.mmio._config.raw_mode;
                 bytes[rel_offset] = value;
+
+                if (this.mmio._config.raw_mode != old_raw_mode) {
+                    this.mmio._status.len = 0;
+                    @memset(this.input, 0);
+
+                    _ = machine.tryCallSyscallProc(&.{
+                        x.num(slot),
+                        NativeCommand.set_raw_mode.byond(),
+                        x.num(if (this.mmio._config.raw_mode != 0) @as(u32, 1) else @as(u32, 0)),
+                    });
+                }
+
                 machine.updateExternalInterrupts();
 
                 return true;
@@ -277,9 +292,7 @@ const SerialTerminal = struct {
 
                 switch (rel_offset) {
                     @offsetOf(sdk.SerialTerminal.Action, "flush") => {
-                        const len = std.mem.indexOfScalar(u8, this.output, 0) orelse {
-                            return true;
-                        };
+                        const len = std.mem.indexOfScalar(u8, this.output, 0) orelse this.output.len;
 
                         if (len == 0) {
                             return true;
@@ -298,10 +311,13 @@ const SerialTerminal = struct {
                             }
                         }
 
+                        @memset(this.output[0..len], 0);
+
                         return machine.tryCallSyscallProc(&.{ x.num(slot), NativeCommand.write.byond(), byond_bytes });
                     },
                     @offsetOf(sdk.SerialTerminal.Action, "ack") => {
                         this.mmio._status.last_event = .{};
+                        this.mmio._status.len = 0;
                         machine.updateExternalInterrupts();
 
                         return true;
@@ -386,33 +402,42 @@ const SerialTerminal = struct {
                     return x.False();
                 }
 
-                var bytes_len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_bytes_len));
-                bytes_len = std.math.clamp(bytes_len, 0, sdk.SerialTerminal.INPUT_BUFFER_SIZE);
+                const incoming_len: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_bytes_len));
 
-                for (0..bytes_len) |i| {
+                const current_len: u32 = this.mmio._status.len;
+                const available: u32 = @intCast(sdk.SerialTerminal.INPUT_BUFFER_SIZE - current_len);
+                const bytes_to_write: u32 = @min(incoming_len, available);
+
+                if (bytes_to_write == 0) {
+                    // Buffer full - signal overflow but don't lose the interrupt
+                    if (current_len > 0) {
+                        this.mmio._status.last_event = .{ .ty = .new_data };
+                        machine.updateExternalInterrupts();
+                    }
+
+                    return x.True();
+                }
+
+                var actually_written: u32 = 0;
+                for (0..bytes_to_write) |i| {
                     var byond_byte: x.ByondValue = .{};
 
                     if (!x.Byond_ReadListIndex(bytes, &x.num(i + 1), &byond_byte)) {
-                        this.input[i] = 0;
-                        bytes_len = i;
-
                         break;
                     }
 
                     if (!x.ByondValue_IsNum(&byond_byte)) {
-                        this.input[i] = 0;
-                        bytes_len = i;
-
                         break;
                     }
 
                     const byte: u32 = @intFromFloat(x.ByondValue_GetNum(&byond_byte));
-                    this.input[i] = @truncate(byte);
+                    this.input[current_len + i] = @truncate(byte);
+                    actually_written += 1;
                 }
 
-                if (bytes_len > 0) {
+                if (actually_written > 0) {
                     this.mmio._status.last_event = .{ .ty = .new_data };
-                    this.mmio._status.len = @truncate(bytes_len);
+                    this.mmio._status.len = @truncate(current_len + actually_written);
                     machine.updateExternalInterrupts();
                 }
 
@@ -1475,7 +1500,7 @@ const Machine = struct {
 
     inline fn readClint(this: *Machine, offset: u32) ?u8 {
         switch (offset) {
-            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + sizeOfField(sdk.Clint, "_status") - 1) => {
+            @offsetOf(sdk.Clint, "_config")...(@offsetOf(sdk.Clint, "_config") + sizeOfField(sdk.Clint, "_config") - 1) => {
                 const rel_offset = offset - @offsetOf(sdk.Clint, "_config");
 
                 switch (rel_offset) {
@@ -1723,12 +1748,12 @@ const Machine = struct {
         switch (this.dma._config.mode) {
             .fill => {
                 if (this.dma._config.pattern_len == 0) {
-                    return false;
+                    return true;
                 }
             },
             .read, .write => {
                 if (this.dma._config.len == 0) {
-                    return false;
+                    return true;
                 }
             },
             else => return false,
@@ -2992,26 +3017,13 @@ pub export fn Z_machine_load_elf(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.
     const id: Machine.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
 
     const byond_path = &args[1];
-    var len: u32 = 0;
 
-    if (!x.Byond_ToString(byond_path, null, &len) and len == 0) {
-        x.Byond_CRASH("Failed to convert the path argument to a string");
-
-        return z.returnCast(.{});
-    }
-
-    const path = state.allocator.allocSentinel(u8, len - 1, 0) catch {
-        x.Byond_CRASH("Failed to allocate a memory for a path: Out of memory");
+    const path = x.toString(state.allocator, byond_path) catch {
+        x.Byond_CRASH("Failed to Byond_ToString the path argument");
 
         return z.returnCast(.{});
     };
     defer state.allocator.free(path);
-
-    if (!x.Byond_ToString(byond_path, path.ptr, &len)) {
-        x.Byond_CRASH("Failed to convert the path argument to a string");
-
-        return z.returnCast(.{});
-    }
 
     state.machineLoadElf(id, path) catch {
         return z.returnCast(x.False());

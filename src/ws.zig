@@ -591,28 +591,14 @@ pub export fn Z_ws_start(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
     const byond_config = &args[3];
 
     if (!x.ByondValue_IsNull(byond_config)) {
-        var buflen: x.u4c = 0;
-
-        if (!x.Byond_ToString(byond_config, null, &buflen) and buflen == 0) {
+        const config_str = x.toString(state.allocator, byond_config) catch {
             x.Byond_CRASH("Failed to Byond_ToString the cfg argument");
-
-            return z.returnCast(.{});
-        }
-
-        const buf = state.allocator.allocSentinel(u8, buflen - 1, 0) catch {
-            x.Byond_CRASH("Failed to allocate memory for the cfg argument");
 
             return z.returnCast(.{});
         };
-        defer state.allocator.free(buf);
+        defer state.allocator.free(config_str);
 
-        if (!x.Byond_ToString(byond_config, buf.ptr, &buflen)) {
-            x.Byond_CRASH("Failed to Byond_ToString the cfg argument");
-
-            return z.returnCast(.{});
-        }
-
-        const parsed_config = std.json.parseFromSlice(WsConfig, state.allocator, buf, .{}) catch |err| {
+        const parsed_config = std.json.parseFromSlice(WsConfig, state.allocator, config_str, .{}) catch |err| {
             std.log.err("Failed to parse the cfg argument: {t}", .{err});
             x.Byond_CRASH("Failed to parse the cfg argument");
 
@@ -679,26 +665,12 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
     const conn = &state.server.?.connections.items[idx];
 
     if (x.ByondValue_IsStr(byond_content)) {
-        var buflen: x.u4c = 0;
-
-        if (!x.Byond_ToString(byond_content, null, &buflen) and buflen == 0) {
-            std.log.err("Failed to Byond_ToString the content argument", .{});
-
-            return z.returnCast(.{});
-        }
-
-        const buf = state.allocator.allocSentinel(u8, buflen - 1, 0) catch {
-            x.Byond_CRASH("Failed to allocate memory for the content argument");
+        const content = x.toString(state.allocator, byond_content) catch {
+            x.Byond_CRASH("Failed to Byond_ToSring the content argument");
 
             return z.returnCast(.{});
         };
-        defer state.allocator.free(buf);
-
-        if (!x.Byond_ToString(byond_content, buf.ptr, &buflen)) {
-            x.Byond_CRASH("Failed to Byond_ToString the content argument");
-
-            return z.returnCast(.{});
-        }
+        defer state.allocator.free(content);
 
         if (state.server.?.log) {
             if (conn.getRemoteAddress()) |addr| {
@@ -707,13 +679,13 @@ pub export fn Z_ws_send(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
 
                 addr.format(&writer) catch unreachable;
 
-                std.log.info("ws text to {s}: {s}", .{ address[0..writer.end], buf });
+                std.log.info("ws text to {s}: {s}", .{ address[0..writer.end], content });
             } else {
-                std.log.info("ws text to UNKNOWN: {s}", .{buf});
+                std.log.info("ws text to UNKNOWN: {s}", .{content});
             }
         }
 
-        conn.sendText(state.allocator, buf) catch {
+        conn.sendText(state.allocator, content) catch {
             return z.returnCast(x.False());
         };
 
