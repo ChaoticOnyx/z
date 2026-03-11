@@ -5,9 +5,11 @@ const std = @import("std");
 
 const ondatra = @import("ondatra");
 const sdk = @import("mcu_sdk");
-const ztracy = @import("ztracy");
 
+const flate = @import("compress/flate.zig");
+const helpers = @import("helpers.zig");
 const os = @import("os.zig");
+const ws = @import("ws.zig");
 const x = @import("x.zig");
 const z = @import("root.zig");
 
@@ -113,7 +115,7 @@ const Tts = struct {
                             return false;
                         };
 
-                        const msg = this.memory[0 .. term_pos - 1 :0];
+                        const msg = this.memory[0..term_pos :0];
 
                         if (msg.len == 0) {
                             return false;
@@ -1005,6 +1007,842 @@ const EnvSensor = struct {
     }
 };
 
+pub const Vga = struct {
+    pub const NativeCommand = enum(u8) {
+        vblank = 1,
+        set_resolution = 2,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.num(@intFromEnum(this));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        send_screen = 1,
+        keyboard_event = 2,
+        mouse_event = 3,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.Vga = .{},
+    palette: []sdk.Rgb,
+    fb: []u8,
+    frame: []u8,
+    keyboard: []sdk.Vga.KeyState,
+    keyboard_events: std.ArrayList(sdk.Vga.KeyboardEvent) = .empty,
+    mouse_events: std.ArrayList(sdk.Vga.MouseEvent) = .empty,
+    elapsed_from_vblank_us: u32 = 0,
+
+    pub inline fn init(allocator: std.mem.Allocator) !Vga {
+        const palette = try allocator.alloc(sdk.Rgb, sdk.Vga.PAL_LEN);
+        errdefer allocator.free(palette);
+
+        const fb = try allocator.alloc(u8, sdk.Vga.Resolution.hi.len());
+        errdefer allocator.free(fb);
+
+        const frame = try allocator.alloc(u8, sdk.Vga.Resolution.hi.len() * @sizeOf(sdk.Rgb));
+        errdefer allocator.free(frame);
+
+        const keyboard = try allocator.alloc(sdk.Vga.KeyState, sdk.Vga.Scancode.KEYS);
+        errdefer allocator.free(keyboard);
+
+        var keyboard_events = try std.ArrayList(sdk.Vga.KeyboardEvent).initCapacity(allocator, sdk.Vga.KeyboardEvent.MAX_EVENTS);
+        errdefer keyboard_events.deinit(allocator);
+
+        var mouse_events = try std.ArrayList(sdk.Vga.MouseEvent).initCapacity(allocator, sdk.Vga.MouseEvent.MAX_EVENTS);
+        errdefer mouse_events.deinit(allocator);
+
+        return Vga{
+            .mmio = .{},
+            .palette = palette,
+            .fb = fb,
+            .frame = frame,
+            .keyboard = keyboard,
+            .keyboard_events = keyboard_events,
+            .mouse_events = mouse_events,
+        };
+    }
+
+    pub inline fn reset(this: *Vga) void {
+        this.mmio = .{};
+        @memset(this.palette, .{});
+        @memset(this.fb, 0);
+        @memset(this.frame, .{});
+        @memset(this.keyboard, .{});
+        this.keyboard_events.clearRetainingCapacity();
+        this.mouse_events.clearRetainingCapacity();
+    }
+
+    pub inline fn update(this: *Vga, slot: u8, machine: *Machine, delta_us: u32) void {
+        const freq_s: f32 = 1.0 / @as(f32, @floatFromInt(this.mmio._config.resolution.fps()));
+        const freq_us: u32 = @intFromFloat(freq_s * std.time.us_per_s);
+
+        this.elapsed_from_vblank_us +|= delta_us;
+
+        if (this.elapsed_from_vblank_us < freq_us) {
+            return;
+        }
+
+        this.elapsed_from_vblank_us -= freq_us;
+
+        this.mmio._status.last_event = .{ .ty = .vblank };
+        machine.updateExternalInterrupts();
+
+        _ = machine.tryCallSyscallProc(&.{
+            x.num(slot),
+            NativeCommand.vblank.byond(),
+        });
+    }
+
+    pub inline fn mmioRead(this: *Vga, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        return genericMmioRead(&this.mmio, offset, sdk.Vga);
+    }
+
+    pub inline fn mmioWrite(this: *Vga, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.Vga, "_config")...(@offsetOf(sdk.Vga, "_config") + sizeOfField(sdk.Vga, "_config") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Vga, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                const old_res = this.mmio._config.resolution;
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                const new_res = this.mmio._config.resolution;
+
+                if (new_res != old_res) {
+                    this.elapsed_from_vblank_us = 0;
+                    _ = machine.tryCallSyscallProc(&.{
+                        x.num(slot),
+                        NativeCommand.set_resolution.byond(),
+                        x.num(new_res.width()),
+                        x.num(new_res.height()),
+                    });
+                }
+
+                return true;
+            },
+            @offsetOf(sdk.Vga, "_action")...(@offsetOf(sdk.Vga, "_action") + sizeOfField(sdk.Vga, "_action") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.Vga, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.Vga.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    @offsetOf(sdk.Vga.Action, "keyboard_ack") => {
+                        this.mmio._status.head_keyboard_event = .{};
+
+                        if (this.keyboard_events.items.len > 0) {
+                            this.mmio._status.head_keyboard_event = this.keyboard_events.orderedRemove(0);
+                        }
+
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    @offsetOf(sdk.Vga.Action, "mouse_ack") => {
+                        this.mmio._status.head_mouse_event = .{};
+
+                        if (this.mouse_events.items.len > 0) {
+                            this.mmio._status.head_mouse_event = this.mouse_events.orderedRemove(0);
+                        }
+
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    @offsetOf(sdk.Vga.Action, "execute_blitter") => {
+                        return this.executeBlitter(machine);
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub inline fn executeDma(this: *Vga, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
+        _ = slot;
+
+        const pal_bytes = std.mem.sliceAsBytes(this.palette);
+        const fb_bytes = std.mem.sliceAsBytes(this.fb);
+        const keyboard_bytes = std.mem.sliceAsBytes(this.keyboard);
+
+        std.debug.assert(this.palette.len == sdk.Vga.PAL_LEN);
+        std.debug.assert(pal_bytes.len == sdk.Vga.PAL_SIZE);
+
+        std.debug.assert(this.fb.len == sdk.Vga.Resolution.hi.len());
+        std.debug.assert(fb_bytes.len == sdk.Vga.Resolution.hi.size());
+
+        std.debug.assert(this.keyboard.len == sdk.Vga.KEYBOARD_LEN);
+        std.debug.assert(keyboard_bytes.len == sdk.Vga.KEYBOARD_SIZE);
+
+        switch (cfg.mode) {
+            .read => {
+                if (cfg.dst_address +| cfg.len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                switch (cfg.src_address) {
+                    sdk.Vga.KEYBOARD_ADDRESS...(sdk.Vga.KEYBOARD_ADDRESS + sdk.Vga.KEYBOARD_SIZE - 1) => {
+                        const rel_offset = cfg.src_address - sdk.Vga.KEYBOARD_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.KEYBOARD_SIZE) {
+                            return false;
+                        }
+
+                        @memcpy(machine.cpu.ram[cfg.dst_address..][0..cfg.len], keyboard_bytes[rel_offset..][0..cfg.len]);
+
+                        return true;
+                    },
+                    sdk.Vga.PAL_ADDRESS...(sdk.Vga.PAL_ADDRESS + sdk.Vga.PAL_SIZE - 1) => {
+                        const rel_offset = cfg.src_address - sdk.Vga.PAL_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.PAL_SIZE) {
+                            return false;
+                        }
+
+                        @memcpy(machine.cpu.ram[cfg.dst_address..][0..cfg.len], pal_bytes[rel_offset..][0..cfg.len]);
+
+                        return true;
+                    },
+                    sdk.Vga.FB_ADDRESS...(sdk.Vga.FB_ADDRESS + sdk.Vga.Resolution.hi.size() - 1) => {
+                        const rel_offset = cfg.src_address - sdk.Vga.FB_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.Resolution.hi.size()) {
+                            return false;
+                        }
+
+                        @memcpy(machine.cpu.ram[cfg.dst_address..][0..cfg.len], fb_bytes[rel_offset..][0..cfg.len]);
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            .write => {
+                if (cfg.src_address +| cfg.len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                switch (cfg.dst_address) {
+                    sdk.Vga.KEYBOARD_ADDRESS...(sdk.Vga.KEYBOARD_ADDRESS + sdk.Vga.KEYBOARD_SIZE - 1) => return false,
+                    sdk.Vga.PAL_ADDRESS...(sdk.Vga.PAL_ADDRESS + sdk.Vga.PAL_SIZE - 1) => {
+                        const rel_offset = cfg.dst_address - sdk.Vga.PAL_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.PAL_SIZE) {
+                            return false;
+                        }
+
+                        @memcpy(pal_bytes[rel_offset..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
+
+                        return true;
+                    },
+                    sdk.Vga.FB_ADDRESS...(sdk.Vga.FB_ADDRESS + sdk.Vga.Resolution.hi.size() - 1) => {
+                        const rel_offset = cfg.dst_address - sdk.Vga.FB_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.Resolution.hi.size()) {
+                            return false;
+                        }
+
+                        @memcpy(fb_bytes[rel_offset..][0..cfg.len], machine.cpu.ram[cfg.src_address..][0..cfg.len]);
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            .fill => {
+                if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
+
+                switch (cfg.dst_address) {
+                    sdk.Vga.KEYBOARD_ADDRESS...(sdk.Vga.KEYBOARD_ADDRESS + sdk.Vga.KEYBOARD_SIZE - 1) => return false,
+                    sdk.Vga.PAL_ADDRESS...(sdk.Vga.PAL_ADDRESS + sdk.Vga.PAL_SIZE - 1) => {
+                        const rel_offset = cfg.dst_address - sdk.Vga.PAL_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.PAL_SIZE) {
+                            return false;
+                        }
+
+                        dmaFill(pattern, pal_bytes[rel_offset..][0..cfg.len]);
+
+                        return true;
+                    },
+                    sdk.Vga.FB_ADDRESS...(sdk.Vga.FB_ADDRESS + sdk.Vga.Resolution.hi.size() - 1) => {
+                        const rel_offset = cfg.dst_address - sdk.Vga.FB_ADDRESS;
+
+                        if (rel_offset +| cfg.len > sdk.Vga.Resolution.hi.size()) {
+                            return false;
+                        }
+
+                        dmaFill(pattern, fb_bytes[rel_offset..][0..cfg.len]);
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub fn syscall(this: *Vga, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .send_screen => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                const byond_conn_id = &args[1];
+                const conn_id: u32 = @intFromFloat(x.ByondValue_GetNum(byond_conn_id));
+
+                const ws_state = ws.getState();
+
+                if (ws_state.server == null) {
+                    return x.True();
+                }
+
+                if (conn_id >= ws_state.server.?.connections.items.len) {
+                    return x.True();
+                }
+
+                const conn = &ws_state.server.?.connections.items[conn_id];
+
+                const compression: flate.Compress.Options = if (this.mmio._config.resolution == .lo)
+                    .default
+                else
+                    .best;
+
+                var window_buffer: [flate.max_window_len]u8 = undefined;
+                var writer: std.Io.Writer = .fixed(this.frame);
+                var compressor = flate.Compress.init(&writer, &window_buffer, .zlib, compression) catch |err| {
+                    std.log.err("Failed to write compressed data: {t}", .{err});
+
+                    return x.False();
+                };
+
+                compressor.writer.writeAll(std.mem.sliceAsBytes(this.palette)) catch |err| {
+                    std.log.err("Failed to compress palette data: {t}", .{err});
+
+                    return x.False();
+                };
+
+                const fb_len = this.mmio._config.resolution.len();
+                compressor.writer.writeAll(std.mem.sliceAsBytes(this.fb[0..fb_len])) catch |err| {
+                    std.log.err("Failed to compress framebuffer data: {t}", .{err});
+
+                    return x.False();
+                };
+
+                compressor.finish() catch |err| {
+                    std.log.err("Failed to finish the compressor: {t}", .{err});
+
+                    return x.False();
+                };
+
+                conn.sendBinary(ws_state.allocator, this.frame[0..writer.end]) catch |err| {
+                    std.log.err("Failed to send the screen data: {t}", .{err});
+
+                    return x.False();
+                };
+
+                return x.True();
+            },
+            .keyboard_event => {
+                if (args.len != 4) {
+                    return x.False();
+                }
+
+                const raw_ty = helpers.safeIntTruncate(u8, x.ByondValue_GetNum(&args[1])) orelse {
+                    return x.True();
+                };
+
+                const ty = std.enums.fromInt(sdk.Vga.KeyboardEvent.Type, raw_ty) orelse {
+                    return x.True();
+                };
+
+                const raw_scancode = helpers.safeIntTruncate(u8, x.ByondValue_GetNum(&args[2])) orelse {
+                    return x.True();
+                };
+
+                const scancode = std.enums.fromInt(sdk.Vga.Scancode, raw_scancode) orelse {
+                    return x.True();
+                };
+
+                const modifiers = helpers.safeIntTruncate(u8, x.ByondValue_GetNum(&args[3])) orelse {
+                    return x.True();
+                };
+
+                this.enqueueKeyboardEvent(machine, .{
+                    .ty = ty,
+                    .scancode = scancode,
+                    .modifiers = @bitCast(modifiers),
+                });
+
+                return x.True();
+            },
+            .mouse_event => {
+                if (args.len != 7) {
+                    return x.False();
+                }
+
+                const raw_ty = helpers.safeIntTruncate(u8, x.ByondValue_GetNum(&args[1])) orelse {
+                    return x.True();
+                };
+
+                const ty = std.enums.fromInt(sdk.Vga.MouseEvent.Type, raw_ty) orelse {
+                    return x.True();
+                };
+
+                const raw_button = helpers.safeIntTruncate(u8, x.ByondValue_GetNum(&args[2])) orelse {
+                    return x.True();
+                };
+
+                const button = std.enums.fromInt(sdk.Vga.MouseButton, raw_button) orelse {
+                    return x.True();
+                };
+
+                const dx = helpers.safeIntTruncate(i16, x.ByondValue_GetNum(&args[3])) orelse {
+                    return x.True();
+                };
+
+                const dy = helpers.safeIntTruncate(i16, x.ByondValue_GetNum(&args[4])) orelse {
+                    return x.True();
+                };
+
+                const scroll_dx = helpers.safeIntTruncate(i16, x.ByondValue_GetNum(&args[5])) orelse {
+                    return x.True();
+                };
+
+                const scroll_dy = helpers.safeIntTruncate(i16, x.ByondValue_GetNum(&args[6])) orelse {
+                    return x.True();
+                };
+
+                this.enqueueMouseEvent(machine, .{
+                    .ty = ty,
+                    .button = button,
+                    .dx = dx,
+                    .dy = dy,
+                    .scroll_dx = scroll_dx,
+                    .scroll_dy = scroll_dy,
+                });
+
+                return x.True();
+            },
+            else => return x.False(),
+        }
+    }
+
+    pub inline fn isInterruptPending(this: *Vga, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_vblank and this.mmio._status.last_event.ty == .vblank) {
+            return true;
+        }
+
+        const kbd = this.mmio._config.keyboard_interrupts;
+
+        if (kbd.on_key_press or kbd.on_key_release) {
+            if (kbd.on_key_press and this.mmio._status.head_keyboard_event.ty == .press) {
+                return true;
+            }
+
+            if (kbd.on_key_release and this.mmio._status.head_keyboard_event.ty == .release) {
+                return true;
+            }
+
+            for (this.keyboard_events.items) |item| {
+                if (kbd.on_key_press and item.ty == .press) {
+                    return true;
+                }
+
+                if (kbd.on_key_release and item.ty == .release) {
+                    return true;
+                }
+            }
+        }
+
+        const mouse = this.mmio._config.mouse_interrupts;
+
+        if (mouse.on_button_press or mouse.on_button_release or mouse.on_move or mouse.on_scroll) {
+            if (mouse.on_button_press and this.mmio._status.head_mouse_event.ty == .press) {
+                return true;
+            }
+
+            if (mouse.on_button_release and this.mmio._status.head_mouse_event.ty == .release) {
+                return true;
+            }
+
+            if (mouse.on_move and this.mmio._status.head_mouse_event.ty == .move) {
+                return true;
+            }
+
+            if (mouse.on_scroll and this.mmio._status.head_mouse_event.ty == .scroll) {
+                return true;
+            }
+
+            for (this.mouse_events.items) |item| {
+                if (mouse.on_button_press and item.ty == .press) {
+                    return true;
+                }
+
+                if (mouse.on_button_release and item.ty == .release) {
+                    return true;
+                }
+
+                if (mouse.on_move and item.ty == .move) {
+                    return true;
+                }
+
+                if (mouse.on_scroll and item.ty == .scroll) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    pub inline fn deinit(this: *Vga, allocator: std.mem.Allocator) void {
+        allocator.free(this.palette);
+        this.palette = &.{};
+
+        allocator.free(this.fb);
+        this.fb = &.{};
+
+        allocator.free(this.frame);
+        this.frame = &.{};
+    }
+
+    inline fn isqrt(n: i64) i32 {
+        if (n <= 0) {
+            return 0;
+        }
+
+        return @intFromFloat(@sqrt(@as(f64, @floatFromInt(n))));
+    }
+
+    inline fn wrapCoord(val: i32, size: i32) usize {
+        var m = @rem(val, size);
+
+        if (m < 0) {
+            m += size;
+        }
+
+        return @intCast(m);
+    }
+
+    inline fn applyRectOrigin(
+        pos: sdk.Vga.BlitterConfig.Args.Position,
+        w: u16,
+        h: u16,
+        origin: sdk.Vga.BlitterConfig.Args.Origin,
+    ) struct { x: i32, y: i32 } {
+        const px: i32 = pos.x;
+        const py: i32 = pos.y;
+        const wi: i32 = w;
+        const hi: i32 = h;
+
+        return switch (origin) {
+            .top_left => .{ .x = px, .y = py },
+            .top => .{ .x = px - @divTrunc(wi, 2), .y = py },
+            .top_right => .{ .x = px - wi, .y = py },
+            .right => .{ .x = px - wi, .y = py - @divTrunc(hi, 2) },
+            .bottom_right => .{ .x = px - wi, .y = py - hi },
+            .bottom => .{ .x = px - @divTrunc(wi, 2), .y = py - hi },
+            .bottom_left => .{ .x = px, .y = py - hi },
+            .left => .{ .x = px, .y = py - @divTrunc(hi, 2) },
+            .center => .{ .x = px - @divTrunc(wi, 2), .y = py - @divTrunc(hi, 2) },
+        };
+    }
+
+    inline fn applyCircleOrigin(
+        pos: sdk.Vga.BlitterConfig.Args.Position,
+        r: u16,
+        origin: sdk.Vga.BlitterConfig.Args.Origin,
+    ) struct { x: i32, y: i32 } {
+        const px: i32 = pos.x;
+        const py: i32 = pos.y;
+        const ri: i32 = r;
+
+        return switch (origin) {
+            .top_left => .{ .x = px + ri, .y = py + ri },
+            .top => .{ .x = px, .y = py + ri },
+            .top_right => .{ .x = px - ri, .y = py + ri },
+            .right => .{ .x = px - ri, .y = py },
+            .bottom_right => .{ .x = px - ri, .y = py - ri },
+            .bottom => .{ .x = px, .y = py - ri },
+            .bottom_left => .{ .x = px + ri, .y = py - ri },
+            .left => .{ .x = px + ri, .y = py },
+            .center => .{ .x = px, .y = py },
+        };
+    }
+
+    inline fn executeBlitter(this: *Vga, machine: *Machine) bool {
+        const cmd = this.mmio._config.blitter.cmd;
+        const args = this.mmio._config.blitter.args;
+
+        const width = this.mmio._config.resolution.width();
+        const height = this.mmio._config.resolution.height();
+
+        switch (cmd) {
+            .clear => {
+                @memset(this.fb, args.clear.color);
+
+                return true;
+            },
+            .rect => {
+                const rect = args.rect;
+                const pos = applyRectOrigin(rect.pos, rect.w, rect.h, rect.origin);
+
+                switch (rect.mode) {
+                    .crop => {
+                        const x_start = @max(0, pos.x);
+                        const y_start = @max(0, pos.y);
+                        const x_end = @min(width, pos.x + @as(i32, rect.w));
+                        const y_end = @min(height, pos.y + @as(i32, rect.h));
+
+                        if (x_start >= x_end or y_start >= y_end) {
+                            return true;
+                        }
+
+                        const xs: usize = @intCast(x_start);
+                        const xe: usize = @intCast(x_end);
+                        const row_len = xe - xs;
+
+                        for (@as(usize, @intCast(y_start))..@as(usize, @intCast(y_end))) |y| {
+                            @memset(this.fb[y * width + xs ..][0..row_len], rect.color);
+                        }
+
+                        return true;
+                    },
+                    .wrap => {
+                        for (0..rect.h) |dy| {
+                            const cy = wrapCoord(pos.y + @as(i32, @intCast(dy)), height);
+
+                            for (0..rect.w) |dx| {
+                                const cx = wrapCoord(pos.x + @as(i32, @intCast(dx)), width);
+
+                                this.fb[cy * width + cx] = rect.color;
+                            }
+                        }
+
+                        return true;
+                    },
+                }
+            },
+            .circle => {
+                const circle = args.circle;
+                const center = applyCircleOrigin(circle.pos, circle.r, circle.origin);
+                const r: i32 = circle.r;
+
+                if (r == 0) {
+                    return true;
+                }
+
+                const r_sq: i64 = @as(i64, r) * @as(i64, r);
+
+                switch (circle.mode) {
+                    .crop => {
+                        const y_min = @max(0, center.y - r);
+                        const y_max = @min(height, center.y + r + 1);
+
+                        if (y_min >= y_max) {
+                            return true;
+                        }
+
+                        for (@as(usize, @intCast(y_min))..@as(usize, @intCast(y_max))) |y| {
+                            const dy: i64 = @as(i32, @intCast(y)) - center.y;
+                            const x_offset_raw = isqrt(r_sq - dy * dy);
+
+                            if (x_offset_raw == 0 and r >= 3) {
+                                continue;
+                            }
+
+                            const x_offset = if (x_offset_raw == r and r >= 3) x_offset_raw - 1 else x_offset_raw;
+
+                            const x_start = @max(0, center.x - x_offset);
+                            const x_end = @min(width, center.x + x_offset + 1);
+
+                            if (x_start < x_end) {
+                                const xs: usize = @intCast(x_start);
+                                const xe: usize = @intCast(x_end);
+
+                                @memset(this.fb[y * width + xs ..][0 .. xe - xs], circle.color);
+                            }
+                        }
+
+                        return true;
+                    },
+                    .wrap => {
+                        const diameter: usize = @as(usize, 2 * @as(u32, circle.r)) + 1;
+
+                        for (0..diameter) |dy_idx| {
+                            const dy: i64 = @as(i32, @intCast(dy_idx)) - r;
+                            const x_offset_sq = r_sq - dy * dy;
+
+                            if (x_offset_sq < 0) {
+                                continue;
+                            }
+
+                            const x_offset_raw = isqrt(x_offset_sq);
+
+                            if (x_offset_raw == 0 and r >= 3) {
+                                continue;
+                            }
+
+                            const x_offset = if (x_offset_raw == r and r >= 3) x_offset_raw - 1 else x_offset_raw;
+
+                            const cy = wrapCoord(center.y + @as(i32, @intCast(dy_idx)) - r, height);
+                            const span: usize = @as(usize, @intCast(2 * x_offset)) + 1;
+
+                            for (0..span) |dx_idx| {
+                                const dx: i32 = @as(i32, @intCast(dx_idx)) - x_offset;
+                                const cx = wrapCoord(center.x + dx, width);
+
+                                this.fb[cy * width + cx] = circle.color;
+                            }
+                        }
+
+                        return true;
+                    },
+                }
+            },
+            .copy => {
+                const copy = args.copy;
+                const bytes_len = @as(u64, copy.w) * @as(u64, copy.h);
+
+                if (copy.src +| bytes_len > machine.cpu.ram.len) {
+                    return false;
+                }
+
+                const src: [*]const u8 = @ptrCast(@alignCast(&machine.cpu.ram[copy.src]));
+                const src_stride: usize = copy.w;
+
+                if (copy.src_pos.x >= copy.w or copy.src_pos.y >= copy.h) {
+                    return true;
+                }
+
+                const copy_w: usize = copy.w - copy.src_pos.x;
+                const copy_h: usize = copy.h - copy.src_pos.y;
+
+                const src_x: usize = copy.src_pos.x;
+                const src_y: usize = copy.src_pos.y;
+
+                switch (copy.mode) {
+                    .crop => {
+                        if (copy.dst_pos.x >= width or copy.dst_pos.y >= height) {
+                            return true;
+                        }
+
+                        const dst_x: usize = copy.dst_pos.x;
+                        const dst_y: usize = copy.dst_pos.y;
+
+                        const actual_w = @min(copy_w, width - dst_x);
+                        const actual_h = @min(copy_h, height - dst_y);
+
+                        for (0..actual_h) |dy| {
+                            const src_offset = (src_y + dy) * src_stride + src_x;
+                            const dst_offset = (dst_y + dy) * width + dst_x;
+
+                            @memcpy(this.fb[dst_offset..][0..actual_w], src[src_offset..][0..actual_w]);
+                        }
+
+                        return true;
+                    },
+                    .wrap => {
+                        for (0..copy_h) |dy| {
+                            const wrap_y = @mod(@as(usize, copy.dst_pos.y) + dy, height);
+                            const src_row = (src_y + dy) * src_stride + src_x;
+
+                            for (0..copy_w) |dx| {
+                                const wrap_x = @mod(@as(usize, copy.dst_pos.x) + dx, width);
+
+                                this.fb[wrap_y * width + wrap_x] = src[src_row + dx];
+                            }
+                        }
+
+                        return true;
+                    },
+                }
+            },
+            else => return true,
+        }
+    }
+
+    inline fn enqueueKeyboardEvent(this: *Vga, machine: *Machine, event: sdk.Vga.KeyboardEvent) void {
+        if (event.scancode != .none) {
+            const idx = event.scancode.toIdx();
+
+            if (idx < sdk.Vga.Scancode.KEYS) {
+                this.keyboard[idx] = switch (event.ty) {
+                    .press => true,
+                    .release => false,
+                    else => this.keyboard[idx],
+                };
+            }
+        }
+
+        if (this.mmio._status.head_keyboard_event.ty == .none) {
+            this.mmio._status.head_keyboard_event = event;
+        } else if (this.keyboard_events.items.len < sdk.Vga.KeyboardEvent.MAX_EVENTS) {
+            this.keyboard_events.appendAssumeCapacity(event);
+        }
+
+        machine.updateExternalInterrupts();
+    }
+
+    inline fn enqueueMouseEvent(this: *Vga, machine: *Machine, event: sdk.Vga.MouseEvent) void {
+        switch (event.ty) {
+            .press => switch (event.button) {
+                .left => this.mmio._status.mouse_state.left = true,
+                .right => this.mmio._status.mouse_state.right = true,
+                .middle => this.mmio._status.mouse_state.middle = true,
+                else => {},
+            },
+            .release => switch (event.button) {
+                .left => this.mmio._status.mouse_state.left = false,
+                .right => this.mmio._status.mouse_state.right = false,
+                .middle => this.mmio._status.mouse_state.middle = false,
+                else => {},
+            },
+            else => {},
+        }
+
+        if (this.mmio._status.head_mouse_event.ty == .none) {
+            this.mmio._status.head_mouse_event = event;
+        } else if (this.mouse_events.items.len < sdk.Vga.MouseEvent.MAX_EVENTS) {
+            this.mouse_events.appendAssumeCapacity(event);
+        }
+
+        machine.updateExternalInterrupts();
+    }
+};
+
 const Device = union(enum) {
     none,
     tts: Tts,
@@ -1013,6 +1851,14 @@ const Device = union(enum) {
     gps: Gps,
     light: Light,
     env_sensor: EnvSensor,
+    vga: Vga,
+
+    pub inline fn update(this: *Device, slot: u8, machine: *Machine, delta_us: u32) void {
+        switch (this.*) {
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => {},
+            .vga => this.vga.update(slot, machine, delta_us),
+        }
+    }
 
     pub inline fn mmioRead(this: *Device, slot: u8, machine: *Machine, offset: usize) ?u8 {
         return switch (this.*) {
@@ -1023,6 +1869,7 @@ const Device = union(enum) {
             .gps => return this.gps.mmioRead(slot, machine, offset),
             .light => return this.light.mmioRead(slot, machine, offset),
             .env_sensor => return this.env_sensor.mmioRead(slot, machine, offset),
+            .vga => return this.vga.mmioRead(slot, machine, offset),
         };
     }
 
@@ -1034,6 +1881,7 @@ const Device = union(enum) {
             .signaler => return this.signaler.mmioWrite(slot, machine, offset, value),
             .light => return this.light.mmioWrite(slot, machine, offset, value),
             .env_sensor => return this.env_sensor.mmioWrite(slot, machine, offset, value),
+            .vga => return this.vga.mmioWrite(slot, machine, offset, value),
         };
     }
 
@@ -1042,6 +1890,7 @@ const Device = union(enum) {
             .none, .signaler, .gps, .light, .env_sensor => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
+            .vga => return this.vga.executeDma(slot, machine, cfg),
         };
     }
 
@@ -1053,6 +1902,7 @@ const Device = union(enum) {
             .signaler => return this.signaler.syscall(slot, machine, args),
             .light => return this.light.syscall(slot, machine, args),
             .env_sensor => return this.env_sensor.syscall(slot, machine, args),
+            .vga => return this.vga.syscall(slot, machine, args),
         };
     }
 
@@ -1064,6 +1914,7 @@ const Device = union(enum) {
             .signaler => return this.signaler.isInterruptPending(slot, machine),
             .light => return this.light.isInterruptPending(slot, machine),
             .env_sensor => return this.env_sensor.isInterruptPending(slot, machine),
+            .vga => return this.vga.isInterruptPending(slot, machine),
         };
     }
 
@@ -1076,6 +1927,7 @@ const Device = union(enum) {
             .gps => return @sizeOf(sdk.Gps),
             .light => return @sizeOf(sdk.Light),
             .env_sensor => return @sizeOf(sdk.EnvSensor),
+            .vga => return @sizeOf(sdk.Vga),
         };
     }
 
@@ -1088,6 +1940,7 @@ const Device = union(enum) {
             .gps => .gps,
             .light => .light,
             .env_sensor => .env_sensor,
+            .vga => .vga,
         };
     }
 
@@ -1099,6 +1952,7 @@ const Device = union(enum) {
             .signaler => this.signaler.reset(),
             .light => this.light.reset(),
             .env_sensor => this.env_sensor.reset(),
+            .vga => this.vga.reset(),
         }
     }
 
@@ -1106,6 +1960,7 @@ const Device = union(enum) {
         switch (this.*) {
             .none, .tts, .signaler, .gps, .light, .env_sensor => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
+            .vga => this.vga.deinit(allocator),
         }
     }
 };
@@ -1431,6 +2286,12 @@ const Machine = struct {
 
         if (this.rtc._config.alarm != 0 and timestamp >= this.rtc._config.alarm) {
             this.rtc._status.last_event = .{ .ty = .alarm };
+        }
+    }
+
+    inline fn updatePci(this: *Machine, delta_us: u32) void {
+        for (&this.pci.devices, 0..) |*device, slot| {
+            device.update(@intCast(slot), this, delta_us);
         }
     }
 
@@ -2307,6 +3168,14 @@ pub const State = struct {
             .gps => .{ .gps = .{} },
             .light => .{ .light = .{} },
             .env_sensor => .{ .env_sensor = .{} },
+            .vga => .{
+                .vga = Vga.init(this.allocator) catch {
+                    std.log.err("Failed to allocate memory for a VGA", .{});
+                    z.getState().last_error = @errorName(MachineAttachPciError.OutOfMemory);
+
+                    return MachineAttachPciError.OutOfMemory;
+                },
+            },
         };
 
         return machine.tryAttachPci(device);
@@ -2397,6 +3266,7 @@ pub const State = struct {
             machine.clint._status.last_event = .{ .ty = .sync };
 
             machine.updateRtc(timestamp);
+            machine.updatePci(delta_us);
             machine.updateExternalInterrupts();
 
             while (machine.executed < budget and machine.isRunnable()) {

@@ -8,7 +8,7 @@ const os = @import("os.zig");
 const x = @import("x.zig");
 const z = @import("root.zig");
 
-inline fn getState() *State {
+pub inline fn getState() *State {
     return &z.getState().wsstate;
 }
 
