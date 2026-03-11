@@ -63,6 +63,12 @@ const ConnectionMeta = struct {
     }
 };
 
+const Stats = struct {
+    sent_kilobytes_per_second: u32 = 0,
+    received_kilobytes_per_second: u32 = 0,
+    tick_duration_ms: u32 = 0,
+};
+
 const Server = struct {
     server: libws.Server,
     listener: *os.TcpListener,
@@ -74,7 +80,7 @@ const Server = struct {
 
     initial_message_timeout_ms: i64,
     afk_timeout_ms: i64,
-    tick_time_ms: i64 = 0,
+    tick_duration_ms: i64 = 0,
 
     pub inline fn init(
         allocator: std.mem.Allocator,
@@ -425,7 +431,7 @@ const Server = struct {
             }
         }
 
-        this.tick_time_ms = std.time.milliTimestamp() - now;
+        this.tick_duration_ms = std.time.milliTimestamp() - now;
     }
 
     pub inline fn removeConnection(this: *Server, allocator: std.mem.Allocator, idx: usize) void {
@@ -446,6 +452,14 @@ const Server = struct {
         freeMetadata(allocator, conn);
         conn.deinit(allocator);
         _ = this.connections.swapRemove(idx);
+    }
+
+    pub inline fn getStats(this: *Server) Stats {
+        return .{
+            .sent_kilobytes_per_second = @truncate(this.server.getKilobytesSentPerSecond()),
+            .received_kilobytes_per_second = @truncate(this.server.getKilobytesReceivedPerSecond()),
+            .tick_duration_ms = @truncate(@as(u64, @bitCast(this.tick_duration_ms))),
+        };
     }
 
     pub inline fn deinit(this: *Server, allocator: std.mem.Allocator) void {
@@ -994,6 +1008,43 @@ pub export fn Z_ws_get_port(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
     return z.returnCast(x.num(port));
 }
 
+pub export fn Z_ws_stats(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
+    _ = argv;
+
+    if (argc != 0) {
+        x.Byond_CRASH("Z_ws_stats does not accept args");
+
+        return z.returnCast(.{});
+    }
+
+    const state = getState();
+
+    if (state.server == null) {
+        return z.returnCast(.{});
+    }
+
+    const stats = state.server.?.getStats();
+
+    var buffer: [4096]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+
+    std.json.Stringify.value(stats, .{}, &writer) catch {
+        x.Byond_CRASH("Failed to stringify the stats");
+
+        return z.returnCast(.{});
+    };
+    writer.writeByte(0) catch {
+        x.Byond_CRASH("Failed to write the null terminator");
+
+        return z.returnCast(.{});
+    };
+
+    var ret: x.ByondValue = .{};
+    x.ByondValue_SetStr(&ret, buffer[0 .. writer.end - 1 :0]);
+
+    return z.returnCast(ret);
+}
+
 pub export fn Z_ws_get_tick_time(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnType {
     _ = argv;
 
@@ -1009,7 +1060,7 @@ pub export fn Z_ws_get_tick_time(argc: x.u4c, argv: [*c]x.ByondValue) z.ReturnTy
         return z.returnCast(.{});
     }
 
-    const tick_time_ms: u64 = @bitCast(state.server.?.tick_time_ms);
+    const tick_time_ms: u64 = @bitCast(state.server.?.tick_duration_ms);
 
     return z.returnCast(x.num(@truncate(tick_time_ms)));
 }

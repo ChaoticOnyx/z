@@ -10,6 +10,13 @@ pub const ConnectionTracker = struct {
     ip_connections: std.AutoHashMapUnmanaged(u32, u8) = .empty,
     config: Config,
 
+    // Throughput tracking
+    throughput_window_start: i64 = 0,
+    bytes_sent_in_window: u64 = 0,
+    bytes_received_in_window: u64 = 0,
+    bytes_sent_per_second: u64 = 0,
+    bytes_received_per_second: u64 = 0,
+
     pub const Config = struct {
         max_connections: u32 = 256,
         max_connections_per_ip: u8 = 5,
@@ -76,6 +83,51 @@ pub const ConnectionTracker = struct {
 
     inline fn ipToKey(ip: [4]u8) u32 {
         return @bitCast(ip);
+    }
+
+    inline fn rotateThroughputWindow(this: *ConnectionTracker, now: i64) void {
+        const elapsed = now - this.throughput_window_start;
+        if (elapsed >= 2000) {
+            this.bytes_sent_per_second = 0;
+            this.bytes_received_per_second = 0;
+            this.bytes_sent_in_window = 0;
+            this.bytes_received_in_window = 0;
+            this.throughput_window_start = now;
+        } else if (elapsed >= 1000) {
+            this.bytes_sent_per_second = this.bytes_sent_in_window;
+            this.bytes_received_per_second = this.bytes_received_in_window;
+            this.bytes_sent_in_window = 0;
+            this.bytes_received_in_window = 0;
+            this.throughput_window_start = now;
+        }
+    }
+
+    pub inline fn addBytesSent(this: *ConnectionTracker, n: u64, now: i64) void {
+        this.rotateThroughputWindow(now);
+        this.bytes_sent_in_window += n;
+    }
+
+    pub inline fn addBytesReceived(this: *ConnectionTracker, n: u64, now: i64) void {
+        this.rotateThroughputWindow(now);
+        this.bytes_received_in_window += n;
+    }
+
+    pub inline fn getBytesSentPerSecond(this: *ConnectionTracker, now: i64) u64 {
+        this.rotateThroughputWindow(now);
+        return this.bytes_sent_per_second;
+    }
+
+    pub inline fn getBytesReceivedPerSecond(this: *ConnectionTracker, now: i64) u64 {
+        this.rotateThroughputWindow(now);
+        return this.bytes_received_per_second;
+    }
+
+    pub inline fn getKilobytesSentPerSecond(this: *ConnectionTracker, now: i64) u64 {
+        return this.getBytesSentPerSecond(now) / 1024;
+    }
+
+    pub inline fn getKilobytesReceivedPerSecond(this: *ConnectionTracker, now: i64) u64 {
+        return this.getBytesReceivedPerSecond(now) / 1024;
     }
 };
 
@@ -339,6 +391,13 @@ pub const Connection = struct {
     messages_in_window: u32 = 0,
     bytes_in_window: usize = 0,
 
+    // Throughput tracking
+    throughput_window_start: i64 = 0,
+    bytes_sent_in_window: u64 = 0,
+    bytes_received_in_window: u64 = 0,
+    bytes_sent_per_second: u64 = 0,
+    bytes_received_per_second: u64 = 0,
+
     // Close tracking
     close_code_sent: ?CloseCode = null,
     tracker: ?*ConnectionTracker = null,
@@ -417,6 +476,7 @@ pub const Connection = struct {
             .handshake_start_time = now,
             .last_activity_time = now,
             .rate_window_start = now,
+            .throughput_window_start = now,
             .remote_address = stream.getRemoteAddress(),
         };
     }
@@ -473,6 +533,7 @@ pub const Connection = struct {
             };
 
             this.write_pos += n;
+            this.trackBytesSent(n, this.time_provider.milliTimestamp());
         }
 
         this.write_buffer.clearRetainingCapacity();
@@ -539,6 +600,8 @@ pub const Connection = struct {
 
                 return error.ConnectionClosed;
             }
+
+            this.trackBytesReceived(n, this.time_provider.milliTimestamp());
 
             if (this.read_buffer.items.len + n > this.config.max_handshake_size) {
                 this.state = .closed;
@@ -778,6 +841,8 @@ pub const Connection = struct {
             if (n == 0) {
                 return error.ConnectionClosed;
             }
+
+            this.trackBytesReceived(n, this.time_provider.milliTimestamp());
 
             try this.read_buffer.appendSlice(allocator, buf[0..n]);
         }
@@ -1069,7 +1134,6 @@ pub const Connection = struct {
 
                     this.frame_state.phase = .mask;
                 },
-
                 .mask => {
                     if (this.frame_state.payload_len > this.config.max_frame_size) {
                         this.frame_state.reset();
@@ -1096,7 +1160,6 @@ pub const Connection = struct {
                     this.frame_state.payload_read = 0;
                     this.frame_state.phase = .payload;
                 },
-
                 .payload => {
                     const payload = this.frame_state.payload.?;
                     const remaining = payload.len - this.frame_state.payload_read;
@@ -1137,6 +1200,7 @@ pub const Connection = struct {
                             }
 
                             this.frame_state.payload_read += n;
+                            this.trackBytesReceived(n, this.time_provider.milliTimestamp());
                         }
                     }
 
@@ -1346,6 +1410,64 @@ pub const Connection = struct {
     pub inline fn getCloseSentCode(this: *const Connection) ?CloseCode {
         return this.close_code_sent;
     }
+
+    inline fn rotateThroughputWindow(this: *Connection, now: i64) void {
+        const elapsed = now - this.throughput_window_start;
+
+        if (elapsed >= 2000) {
+            this.bytes_sent_per_second = 0;
+            this.bytes_received_per_second = 0;
+            this.bytes_sent_in_window = 0;
+            this.bytes_received_in_window = 0;
+            this.throughput_window_start = now;
+        } else if (elapsed >= 1000) {
+            this.bytes_sent_per_second = this.bytes_sent_in_window;
+            this.bytes_received_per_second = this.bytes_received_in_window;
+            this.bytes_sent_in_window = 0;
+            this.bytes_received_in_window = 0;
+            this.throughput_window_start = now;
+        }
+    }
+
+    inline fn trackBytesSent(this: *Connection, n: usize, now: i64) void {
+        this.rotateThroughputWindow(now);
+        this.bytes_sent_in_window += @intCast(n);
+
+        if (this.tracker) |tracker| {
+            tracker.addBytesSent(@intCast(n), now);
+        }
+    }
+
+    inline fn trackBytesReceived(this: *Connection, n: usize, now: i64) void {
+        this.rotateThroughputWindow(now);
+        this.bytes_received_in_window += @intCast(n);
+
+        if (this.tracker) |tracker| {
+            tracker.addBytesReceived(@intCast(n), now);
+        }
+    }
+
+    pub inline fn getBytesSentPerSecond(this: *Connection) u64 {
+        const now = this.time_provider.milliTimestamp();
+        this.rotateThroughputWindow(now);
+
+        return this.bytes_sent_per_second;
+    }
+
+    pub inline fn getBytesReceivedPerSecond(this: *Connection) u64 {
+        const now = this.time_provider.milliTimestamp();
+        this.rotateThroughputWindow(now);
+
+        return this.bytes_received_per_second;
+    }
+
+    pub inline fn getKilobytesSentPerSecond(this: *Connection) u64 {
+        return this.getBytesSentPerSecond() / 1024;
+    }
+
+    pub inline fn getKilobytesReceivedPerSecond(this: *Connection) u64 {
+        return this.getBytesReceivedPerSecond() / 1024;
+    }
 };
 
 pub const Server = struct {
@@ -1407,6 +1529,22 @@ pub const Server = struct {
 
     pub inline fn getConnectionCount(this: *const Server) u32 {
         return this.tracker.getConnectionCount();
+    }
+
+    pub inline fn getBytesSentPerSecond(this: *Server) u64 {
+        return this.tracker.getBytesSentPerSecond(this.time_provider.milliTimestamp());
+    }
+
+    pub inline fn getBytesReceivedPerSecond(this: *Server) u64 {
+        return this.tracker.getBytesReceivedPerSecond(this.time_provider.milliTimestamp());
+    }
+
+    pub inline fn getKilobytesSentPerSecond(this: *Server) u64 {
+        return this.tracker.getKilobytesSentPerSecond(this.time_provider.milliTimestamp());
+    }
+
+    pub inline fn getKilobytesReceivedPerSecond(this: *Server) u64 {
+        return this.tracker.getKilobytesReceivedPerSecond(this.time_provider.milliTimestamp());
     }
 };
 
