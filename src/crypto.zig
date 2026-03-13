@@ -26,7 +26,7 @@ pub export fn Z_crypto_random_base64(argc: x.u4c, argv: [*c]x.ByondValue) z.Retu
         return z.returnCast(.{});
     }
 
-    const bytes = state.alloc.allocator().alloc(u8, @intFromFloat(x.ByondValue_GetNum(byond_len))) catch {
+    const bytes = state.allocator.alloc(u8, @intFromFloat(x.ByondValue_GetNum(byond_len))) catch {
         x.Byond_CRASH("Failed to allocate memory for random bytes");
 
         return z.returnCast(.{});
@@ -35,12 +35,12 @@ pub export fn Z_crypto_random_base64(argc: x.u4c, argv: [*c]x.ByondValue) z.Retu
     std.crypto.random.bytes(bytes);
 
     const base64_len = base64_encoder.calcSize(bytes.len);
-    const base64 = state.alloc.allocator().allocSentinel(u8, base64_len, 0) catch {
+    const base64 = state.allocator.allocSentinel(u8, base64_len, 0) catch {
         x.Byond_CRASH("Failed to allocate a base64 string");
 
         return z.returnCast(.{});
     };
-    defer state.alloc.allocator().free(base64);
+    defer state.allocator.free(base64);
 
     _ = base64_encoder.encode(base64, bytes);
 
@@ -76,19 +76,19 @@ pub export fn Z_crypto_hmac_sha256(argc: x.u4c, argv: [*c]x.ByondValue) z.Return
         return z.returnCast(.{});
     }
 
-    const content = x.toString(state.alloc.allocator(), byond_content) catch |err| {
+    const content = x.toString(state.allocator, byond_content) catch |err| {
         std.log.err("Failed to convert content argument to string: {t}", .{err});
 
         return z.returnCast(.{});
     };
-    defer state.alloc.allocator().free(content);
+    defer state.allocator.free(content);
 
-    const key = x.toString(state.alloc.allocator(), byond_key) catch |err| {
+    const key = x.toString(state.allocator, byond_key) catch |err| {
         std.log.err("Failed to convert key argument to string: {t}", .{err});
 
         return z.returnCast(.{});
     };
-    defer state.alloc.allocator().free(key);
+    defer state.allocator.free(key);
 
     const HmacSha256 = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha256);
 
@@ -96,12 +96,12 @@ pub export fn Z_crypto_hmac_sha256(argc: x.u4c, argv: [*c]x.ByondValue) z.Return
     HmacSha256.create(&buf, content, key);
 
     const base64_len = base64_encoder.calcSize(buf.len);
-    const base64 = state.alloc.allocator().allocSentinel(u8, base64_len, 0) catch {
+    const base64 = state.allocator.allocSentinel(u8, base64_len, 0) catch {
         x.Byond_CRASH("Failed to allocate a base64 string");
 
         return z.returnCast(.{});
     };
-    defer state.alloc.allocator().free(base64);
+    defer state.allocator.free(base64);
 
     _ = base64_encoder.encode(base64, &buf);
 

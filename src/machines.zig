@@ -9,6 +9,7 @@ const sdk = @import("mcu_sdk");
 const flate = @import("compress/flate.zig");
 const helpers = @import("helpers.zig");
 const os = @import("os.zig");
+const tracy = @import("tracy.zig");
 const ws = @import("ws.zig");
 const x = @import("x.zig");
 const z = @import("root.zig");
@@ -1030,14 +1031,37 @@ pub const Vga = struct {
         }
     };
 
+    pub const Frame = struct {
+        buffer: []u8,
+        compressed_len: usize = 0,
+        dirty: bool = true,
+
+        pub inline fn init(allocator: std.mem.Allocator) !Frame {
+            return Frame{
+                .buffer = try allocator.alloc(u8, sdk.Vga.Resolution.hi.len() * @sizeOf(sdk.Rgb)),
+            };
+        }
+
+        pub inline fn reset(this: *Frame) void {
+            this.compressed_len = 0;
+            this.dirty = true;
+        }
+
+        pub inline fn deinit(this: *Frame, allocator: std.mem.Allocator) void {
+            allocator.free(this.buffer);
+            this.buffer = &.{};
+        }
+    };
+
     mmio: sdk.Vga = .{},
     palette: []sdk.Rgb,
     fb: []u8,
-    frame: []u8,
+    frame: Frame,
     keyboard: []sdk.Vga.KeyState,
     keyboard_events: std.ArrayList(sdk.Vga.KeyboardEvent) = .empty,
     mouse_events: std.ArrayList(sdk.Vga.MouseEvent) = .empty,
     elapsed_from_vblank_us: u32 = 0,
+    lock: std.Thread.Mutex = .{},
 
     pub inline fn init(allocator: std.mem.Allocator) !Vga {
         const palette = try allocator.alloc(sdk.Rgb, sdk.Vga.PAL_LEN);
@@ -1046,8 +1070,8 @@ pub const Vga = struct {
         const fb = try allocator.alloc(u8, sdk.Vga.Resolution.hi.len());
         errdefer allocator.free(fb);
 
-        const frame = try allocator.alloc(u8, sdk.Vga.Resolution.hi.len() * @sizeOf(sdk.Rgb));
-        errdefer allocator.free(frame);
+        var frame = try Frame.init(allocator);
+        errdefer frame.deinit(allocator);
 
         const keyboard = try allocator.alloc(sdk.Vga.KeyState, sdk.Vga.Scancode.KEYS);
         errdefer allocator.free(keyboard);
@@ -1070,13 +1094,67 @@ pub const Vga = struct {
     }
 
     pub inline fn reset(this: *Vga) void {
+        this.lock.lock();
+        defer this.lock.unlock();
+
         this.mmio = .{};
         @memset(this.palette, .{});
         @memset(this.fb, 0);
-        @memset(this.frame, .{});
+        this.frame.reset();
         @memset(this.keyboard, .{});
         this.keyboard_events.clearRetainingCapacity();
         this.mouse_events.clearRetainingCapacity();
+    }
+
+    pub inline fn worker(this: *Vga, slot: u8, machine: *Machine) void {
+        _ = slot;
+        _ = machine;
+
+        // Lock for this.palette, this.fb and this.frame
+        this.lock.lock();
+        defer this.lock.unlock();
+
+        if (!this.frame.dirty) {
+            return;
+        }
+
+        var window_buffer: [flate.max_window_len]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(this.frame.buffer);
+        var compressor = flate.Compress.init(&writer, &window_buffer, .zlib, .best) catch |err| {
+            std.log.err("Failed to write compressed data: {t}", .{err});
+
+            return;
+        };
+
+        compressor.writer.writeAll(std.mem.sliceAsBytes(this.palette)) catch |err| {
+            std.log.err("Failed to compress palette data: {t}", .{err});
+
+            return;
+        };
+
+        const fb_len = this.mmio._config.resolution.len();
+        compressor.writer.writeAll(std.mem.sliceAsBytes(this.fb[0..fb_len])) catch |err| {
+            std.log.err("Failed to compress framebuffer data: {t}", .{err});
+
+            return;
+        };
+
+        compressor.finish() catch |err| {
+            std.log.err("Failed to finish the compressor: {t}", .{err});
+
+            return;
+        };
+
+        this.frame.compressed_len = writer.end;
+        this.frame.dirty = false;
+    }
+
+    // Caller should lock the machine.
+    pub inline fn requiresWorker(this: *Vga, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        return this.frame.dirty;
     }
 
     pub inline fn update(this: *Vga, slot: u8, machine: *Machine, delta_us: u32) void {
@@ -1177,6 +1255,10 @@ pub const Vga = struct {
     pub inline fn executeDma(this: *Vga, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         _ = slot;
 
+        // Lock for this.palette, this.fb and this.frame
+        this.lock.lock();
+        defer this.lock.unlock();
+
         const pal_bytes = std.mem.sliceAsBytes(this.palette);
         const fb_bytes = std.mem.sliceAsBytes(this.fb);
         const keyboard_bytes = std.mem.sliceAsBytes(this.keyboard);
@@ -1238,6 +1320,8 @@ pub const Vga = struct {
                     return false;
                 }
 
+                this.frame.dirty = true;
+
                 switch (cfg.dst_address) {
                     sdk.Vga.KEYBOARD_ADDRESS...(sdk.Vga.KEYBOARD_ADDRESS + sdk.Vga.KEYBOARD_SIZE - 1) => return false,
                     sdk.Vga.PAL_ADDRESS...(sdk.Vga.PAL_ADDRESS + sdk.Vga.PAL_SIZE - 1) => {
@@ -1269,6 +1353,8 @@ pub const Vga = struct {
                 if (cfg.src_address +| cfg.pattern_len > machine.cpu.ram.len) {
                     return false;
                 }
+
+                this.frame.dirty = true;
 
                 const pattern = machine.cpu.ram[cfg.src_address..][0..cfg.pattern_len];
 
@@ -1316,6 +1402,14 @@ pub const Vga = struct {
                     return x.False();
                 }
 
+                // Lock for this.frame
+                this.lock.lock();
+                defer this.lock.unlock();
+
+                if (this.frame.compressed_len == 0 or this.frame.dirty == true) {
+                    return x.True();
+                }
+
                 const byond_conn_id = &args[1];
                 const conn_id: u32 = @intFromFloat(x.ByondValue_GetNum(byond_conn_id));
 
@@ -1331,39 +1425,7 @@ pub const Vga = struct {
 
                 const conn = &ws_state.server.?.connections.items[conn_id];
 
-                const compression: flate.Compress.Options = if (this.mmio._config.resolution == .lo)
-                    .default
-                else
-                    .best;
-
-                var window_buffer: [flate.max_window_len]u8 = undefined;
-                var writer: std.Io.Writer = .fixed(this.frame);
-                var compressor = flate.Compress.init(&writer, &window_buffer, .zlib, compression) catch |err| {
-                    std.log.err("Failed to write compressed data: {t}", .{err});
-
-                    return x.False();
-                };
-
-                compressor.writer.writeAll(std.mem.sliceAsBytes(this.palette)) catch |err| {
-                    std.log.err("Failed to compress palette data: {t}", .{err});
-
-                    return x.False();
-                };
-
-                const fb_len = this.mmio._config.resolution.len();
-                compressor.writer.writeAll(std.mem.sliceAsBytes(this.fb[0..fb_len])) catch |err| {
-                    std.log.err("Failed to compress framebuffer data: {t}", .{err});
-
-                    return x.False();
-                };
-
-                compressor.finish() catch |err| {
-                    std.log.err("Failed to finish the compressor: {t}", .{err});
-
-                    return x.False();
-                };
-
-                conn.sendBinary(ws_state.allocator, this.frame[0..writer.end]) catch |err| {
+                conn.sendBinary(ws_state.allocator, this.frame.buffer[0..this.frame.compressed_len]) catch |err| {
                     std.log.err("Failed to send the screen data: {t}", .{err});
 
                     return x.False();
@@ -1534,8 +1596,7 @@ pub const Vga = struct {
         allocator.free(this.fb);
         this.fb = &.{};
 
-        allocator.free(this.frame);
-        this.frame = &.{};
+        this.frame.deinit(allocator);
     }
 
     inline fn isqrt(n: i64) i32 {
@@ -1603,6 +1664,12 @@ pub const Vga = struct {
     }
 
     inline fn executeBlitter(this: *Vga, machine: *Machine) bool {
+        // Lock for this.palette and this.fb
+        this.lock.lock();
+        defer this.lock.unlock();
+
+        this.frame.dirty = true;
+
         const cmd = this.mmio._config.blitter.cmd;
         const args = this.mmio._config.blitter.args;
 
@@ -1853,6 +1920,21 @@ const Device = union(enum) {
     env_sensor: EnvSensor,
     vga: Vga,
 
+    pub inline fn worker(this: *Device, slot: u8, machine: *Machine) void {
+        switch (this.*) {
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => {},
+            .vga => this.vga.worker(slot, machine),
+        }
+    }
+
+    // Caller should lock the machine.
+    pub inline fn requiresWorker(this: *Device, slot: u8, machine: *Machine) bool {
+        return switch (this.*) {
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => false,
+            .vga => this.vga.requiresWorker(slot, machine),
+        };
+    }
+
     pub inline fn update(this: *Device, slot: u8, machine: *Machine, delta_us: u32) void {
         switch (this.*) {
             .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => {},
@@ -2029,6 +2111,8 @@ const Machine = struct {
     power: sdk.Power = .{},
     clint: sdk.Clint = .{},
     rtc: sdk.Rtc = .{},
+    // Lock for the pci and the machine itself.
+    lock: std.Thread.Mutex = .{},
 
     pub inline fn init(id: Machine.Id, src: x.ByondValue) Machine {
         const ram: []u8 = &.{};
@@ -2126,6 +2210,10 @@ const Machine = struct {
         const mmio_size = device.mmioSize();
         const alignment = std.mem.Alignment.of(u32);
 
+        // Lock for the pci.
+        this.lock.lock();
+        defer this.lock.unlock();
+
         // Find a free slot
         var free_slot: ?usize = null;
         for (this.pci.devices, 0..) |entry, idx| {
@@ -2181,6 +2269,10 @@ const Machine = struct {
     }
 
     pub inline fn tryDetachPci(this: *Machine, slot: u8) bool {
+        // Lock for the pci.
+        this.lock.lock();
+        defer this.lock.unlock();
+
         if (slot >= sdk.Pci.MAX_DEVICES) {
             return false;
         }
@@ -2293,6 +2385,17 @@ const Machine = struct {
         for (&this.pci.devices, 0..) |*device, slot| {
             device.update(@intCast(slot), this, delta_us);
         }
+    }
+
+    // Caller should lock the machine.
+    inline fn requiresWorker(this: *Machine) bool {
+        for (&this.pci.devices, 0..) |*device, slot| {
+            if (device.requiresWorker(@intCast(slot), this)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     inline fn mmioRead(ctx: *anyopaque, address: u32) ?u8 {
@@ -2784,6 +2887,7 @@ pub const State = struct {
     robin_index: usize = 0,
     budget_percent: usize = 40,
     stats: Stats = .{},
+    wg: std.Thread.WaitGroup = .{},
 
     pub inline fn init(allocator: std.mem.Allocator) State {
         return .{
@@ -3220,6 +3324,16 @@ pub const State = struct {
             const idx = (this.robin_index + served) % this.machines.items.len;
             var machine = &this.machines.items[idx];
 
+            machine.lock.lock();
+            defer machine.lock.unlock();
+
+            defer {
+                if (machine.requiresWorker()) {
+                    const state = z.getState();
+                    state.pool.spawnWg(&this.wg, worker, .{ this, machine });
+                }
+            }
+
             defer machine.tryCallPostTickProc(delta_us);
 
             if (!machine.isRunnable()) {
@@ -3336,6 +3450,9 @@ pub const State = struct {
     }
 
     pub inline fn machineDestroy(this: *State, id: Machine.Id) bool {
+        // Wait for all the workers to finish with the machines.
+        this.wg.wait();
+
         if (this.findMachineEntry(id)) |entry| {
             entry.ptr.deinit(this.allocator);
             _ = this.machines.swapRemove(entry.idx);
@@ -3347,11 +3464,26 @@ pub const State = struct {
     }
 
     pub inline fn deinit(this: *State) void {
+        // Wait for all the workers to finish with the machines.
+        this.wg.wait();
+
         for (this.machines.items) |*machine| {
             machine.deinit(this.allocator);
         }
 
         this.machines.deinit(this.allocator);
+    }
+
+    inline fn worker(this: *State, machine: *Machine) void {
+        _ = this;
+
+        // Lock for pci and the machine itself.
+        machine.lock.lock();
+        defer machine.lock.unlock();
+
+        for (&machine.pci.devices, 0..) |*device, slot| {
+            device.worker(@intCast(slot), machine);
+        }
     }
 
     inline fn updateStats(this: *State, wall_start: i64, delta_us: u32) void {

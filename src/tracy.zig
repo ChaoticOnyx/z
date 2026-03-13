@@ -3,6 +3,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const options = @import("options");
+
 const os = @import("os.zig");
 
 pub const ProtocolVersion: u32 = 76;
@@ -1291,6 +1293,10 @@ pub fn getGlobal() ?*Profiler {
 }
 
 pub inline fn zone(src: std.builtin.SourceLocation) ZoneCtx {
+    if (comptime !options.profiler) {
+        return ZoneCtx{ .profiler = undefined, .active = false };
+    }
+
     if (globalProfiler) |p| {
         return p.zoneBegin(src);
     }
@@ -1299,6 +1305,10 @@ pub inline fn zone(src: std.builtin.SourceLocation) ZoneCtx {
 }
 
 pub inline fn zoneN(src: std.builtin.SourceLocation, name: [:0]const u8) ZoneCtx {
+    if (comptime !options.profiler) {
+        return ZoneCtx{ .profiler = undefined, .active = false };
+    }
+
     if (globalProfiler) |p| {
         return p.zoneBeginN(src, name);
     }
@@ -1307,6 +1317,10 @@ pub inline fn zoneN(src: std.builtin.SourceLocation, name: [:0]const u8) ZoneCtx
 }
 
 pub inline fn zoneC(src: std.builtin.SourceLocation, color: u32) ZoneCtx {
+    if (comptime !options.profiler) {
+        return ZoneCtx{ .profiler = undefined, .active = false };
+    }
+
     if (globalProfiler) |p| {
         return p.zoneBeginC(src, color);
     }
@@ -1315,6 +1329,10 @@ pub inline fn zoneC(src: std.builtin.SourceLocation, color: u32) ZoneCtx {
 }
 
 pub inline fn zoneNC(src: std.builtin.SourceLocation, name: [:0]const u8, color: u32) ZoneCtx {
+    if (comptime !options.profiler) {
+        return ZoneCtx{ .profiler = undefined, .active = false };
+    }
+
     if (globalProfiler) |p| {
         return p.zoneBeginNC(src, name, color);
     }
@@ -1323,24 +1341,40 @@ pub inline fn zoneNC(src: std.builtin.SourceLocation, name: [:0]const u8, color:
 }
 
 pub inline fn frameMark() void {
+    if (comptime !options.profiler) {
+        return;
+    }
+
     if (globalProfiler) |p| {
         p.frameMark();
     }
 }
 
 pub inline fn frameMarkNamed(name: [:0]const u8) void {
+    if (comptime !options.profiler) {
+        return;
+    }
+
     if (globalProfiler) |p| {
         p.frameMarkNamed(name);
     }
 }
 
 pub inline fn message(text: []const u8) void {
+    if (comptime !options.profiler) {
+        return;
+    }
+
     if (globalProfiler) |p| {
         p.message(text);
     }
 }
 
 pub inline fn messageLiteral(text: [:0]const u8) void {
+    if (comptime !options.profiler) {
+        return;
+    }
+
     if (globalProfiler) |p| {
         p.messageLiteral(text);
     }

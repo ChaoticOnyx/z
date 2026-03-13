@@ -66,28 +66,23 @@ fn panicFn(msg: []const u8, rt: ?usize) noreturn {
 }
 
 const State = struct {
-    alloc: std.heap.DebugAllocator(.{}),
+    allocator: std.mem.Allocator,
     mstate: machines.State,
     wsstate: ws.State,
+    pool: std.Thread.Pool,
     last_error: ?[:0]const u8 = null,
 
-    pub inline fn allocator(this: *State) std.mem.Allocator {
-        return this.alloc.allocator();
-    }
-
     pub inline fn deinit(this: *State) void {
+        this.pool.deinit();
         this.mstate.deinit();
         this.wsstate.deinit();
 
         tracy.deinitGlobal();
-
-        if (this.alloc.deinit() == .leak) {
-            std.log.warn("Memory leaks detected", .{});
-        }
     }
 };
 
 var _state: ?State = null;
+var _dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub inline fn getState() *State {
     if (_state == null) {
@@ -95,19 +90,26 @@ pub inline fn getState() *State {
             std.debug.panic("Failed to tinialize the OS API: {t}", .{err});
         };
 
-        const alloc: std.heap.DebugAllocator(.{}) = .init;
-
         _state = .{
-            .alloc = alloc,
+            .allocator = if (builtin.mode == .Debug)
+                _dbg_allocator.allocator()
+            else
+                std.heap.smp_allocator,
             .mstate = undefined,
             .wsstate = undefined,
+            .pool = undefined,
         };
 
-        _state.?.mstate = .init(_state.?.allocator());
-        _state.?.wsstate = .init(_state.?.allocator());
+        _state.?.mstate = .init(_state.?.allocator);
+        _state.?.wsstate = .init(_state.?.allocator);
+        _state.?.pool.init(.{
+            .allocator = _state.?.allocator,
+        }) catch |err| {
+            std.debug.panic("Failed to initialize the worker pool: {t}", .{err});
+        };
 
         if (comptime options.profiler) {
-            tracy.initGlobal(_state.?.allocator()) catch |err| {
+            tracy.initGlobal(_state.?.allocator) catch |err| {
                 std.debug.panic("Failed to initialize Tracy: {t}", .{err});
             };
 
@@ -122,8 +124,10 @@ pub inline fn getState() *State {
     return &_state.?;
 }
 
-// Thank you brain-dead MSVC/LLVM developers.
-pub const ReturnType = if (builtin.os.tag == .windows) u64 else x.ByondValue;
+pub const ReturnType = if (builtin.os.tag == .windows)
+    u64
+else
+    x.ByondValue;
 
 pub inline fn returnCast(in: x.ByondValue) ReturnType {
     if (comptime builtin.os.tag == .windows) {
@@ -167,6 +171,14 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnT
 
     _state = null;
     os.deinit();
+
+    if (comptime builtin.mode == .Debug) {
+        if (_dbg_allocator.deinit() == .leak) {
+            std.log.warn("Memory leaks detected", .{});
+        }
+
+        _dbg_allocator = .init;
+    }
 
     return returnCast(x.True());
 }
