@@ -493,10 +493,6 @@ pub const Connection = struct {
         return conn;
     }
 
-    pub inline fn getRemoteAddress(this: *const Connection) ?os.Address {
-        return this.remote_address;
-    }
-
     pub inline fn deinit(this: *Connection, allocator: std.mem.Allocator) void {
         if (this.tracker) |tracker| {
             const ip = if (this.remote_address) |addr|
@@ -518,6 +514,10 @@ pub const Connection = struct {
         this.fragment_buffer.deinit(allocator);
         this.stream.deinit(allocator);
         this.state = .closed;
+    }
+
+    pub inline fn getRemoteAddress(this: *const Connection) ?os.Address {
+        return this.remote_address;
     }
 
     /// Flushes pending write buffer. Returns true if all data was sent.

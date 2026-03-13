@@ -134,6 +134,20 @@ const Server = struct {
         };
     }
 
+    pub inline fn deinit(this: *Server, allocator: std.mem.Allocator) void {
+        for (this.connections.items) |*conn| {
+            freeMetadata(allocator, conn);
+            conn.deinit(allocator);
+        }
+
+        this.connections.deinit(allocator);
+
+        this.server.deinit(allocator);
+        this.listener.deinit();
+
+        allocator.destroy(this.listener);
+    }
+
     pub inline fn tick(this: *Server, allocator: std.mem.Allocator) WsTickError!void {
         const now = std.time.milliTimestamp();
 
@@ -462,20 +476,6 @@ const Server = struct {
         };
     }
 
-    pub inline fn deinit(this: *Server, allocator: std.mem.Allocator) void {
-        for (this.connections.items) |*conn| {
-            freeMetadata(allocator, conn);
-            conn.deinit(allocator);
-        }
-
-        this.connections.deinit(allocator);
-
-        this.server.deinit(allocator);
-        this.listener.deinit();
-
-        allocator.destroy(this.listener);
-    }
-
     inline fn freeMetadata(allocator: std.mem.Allocator, connection: *libws.Connection) void {
         if (connection.userdata) |userdata| {
             const meta: *ConnectionMeta = @ptrCast(@alignCast(userdata));
@@ -495,6 +495,10 @@ pub const State = struct {
         return .{
             .allocator = allocator,
         };
+    }
+
+    pub inline fn deinit(this: *State) void {
+        _ = this.stop();
     }
 
     pub inline fn start(
@@ -549,10 +553,6 @@ pub const State = struct {
         }
 
         return false;
-    }
-
-    pub inline fn deinit(this: *State) void {
-        _ = this.stop();
     }
 };
 

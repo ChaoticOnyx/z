@@ -77,7 +77,9 @@ const State = struct {
         this.mstate.deinit();
         this.wsstate.deinit();
 
-        tracy.deinitGlobal();
+        if (comptime options.profiler) {
+            tracy.deinitGlobal();
+        }
     }
 };
 
@@ -87,7 +89,7 @@ var _dbg_allocator: std.heap.DebugAllocator(.{}) = .init;
 pub inline fn getState() *State {
     if (_state == null) {
         os.init() catch |err| {
-            std.debug.panic("Failed to tinialize the OS API: {t}", .{err});
+            std.debug.panic("Failed to initialize the OS API: {t}", .{err});
         };
 
         _state = .{
@@ -167,9 +169,9 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnT
 
     if (_state) |*state| {
         state.deinit();
+        _state = null;
     }
 
-    _state = null;
     os.deinit();
 
     if (comptime builtin.mode == .Debug) {

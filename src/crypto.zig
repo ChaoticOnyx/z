@@ -31,6 +31,7 @@ pub export fn Z_crypto_random_base64(argc: x.u4c, argv: [*c]x.ByondValue) z.Retu
 
         return z.returnCast(.{});
     };
+    defer state.allocator.free(bytes);
 
     std.crypto.random.bytes(bytes);
 

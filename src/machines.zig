@@ -1050,6 +1050,7 @@ pub const Vga = struct {
         pub inline fn deinit(this: *Frame, allocator: std.mem.Allocator) void {
             allocator.free(this.buffer);
             this.buffer = &.{};
+            this.dirty = true;
         }
     };
 
@@ -1091,6 +1092,20 @@ pub const Vga = struct {
             .keyboard_events = keyboard_events,
             .mouse_events = mouse_events,
         };
+    }
+
+    pub inline fn deinit(this: *Vga, allocator: std.mem.Allocator) void {
+        allocator.free(this.keyboard);
+        this.keyboard_events.deinit(allocator);
+        this.mouse_events.deinit(allocator);
+
+        allocator.free(this.palette);
+        this.palette = &.{};
+
+        allocator.free(this.fb);
+        this.fb = &.{};
+
+        this.frame.deinit(allocator);
     }
 
     pub inline fn reset(this: *Vga) void {
@@ -1587,16 +1602,6 @@ pub const Vga = struct {
         }
 
         return false;
-    }
-
-    pub inline fn deinit(this: *Vga, allocator: std.mem.Allocator) void {
-        allocator.free(this.palette);
-        this.palette = &.{};
-
-        allocator.free(this.fb);
-        this.fb = &.{};
-
-        this.frame.deinit(allocator);
     }
 
     inline fn isqrt(n: i64) i32 {
@@ -2895,6 +2900,17 @@ pub const State = struct {
         };
     }
 
+    pub inline fn deinit(this: *State) void {
+        // Wait for all the workers to finish with the machines.
+        this.wg.wait();
+
+        for (this.machines.items) |*machine| {
+            machine.deinit(this.allocator);
+        }
+
+        this.machines.deinit(this.allocator);
+    }
+
     pub inline fn machineCreate(this: *State, src: x.ByondValue) MachineCreationError!Machine.Id {
         if (x.ByondValue_IsNull(&src)) {
             z.getState().last_error = @errorName(MachineCreationError.BadSrc);
@@ -3461,17 +3477,6 @@ pub const State = struct {
         }
 
         return false;
-    }
-
-    pub inline fn deinit(this: *State) void {
-        // Wait for all the workers to finish with the machines.
-        this.wg.wait();
-
-        for (this.machines.items) |*machine| {
-            machine.deinit(this.allocator);
-        }
-
-        this.machines.deinit(this.allocator);
     }
 
     inline fn worker(this: *State, machine: *Machine) void {
