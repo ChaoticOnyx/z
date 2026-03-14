@@ -1837,25 +1837,65 @@ pub const Vga = struct {
                         const actual_w = @min(copy_w, width - dst_x);
                         const actual_h = @min(copy_h, height - dst_y);
 
-                        for (0..actual_h) |dy| {
-                            const src_offset = (src_y + dy) * src_stride + src_x;
-                            const dst_offset = (dst_y + dy) * width + dst_x;
+                        switch (copy.alpha) {
+                            .ignore => {
+                                for (0..actual_h) |dy| {
+                                    const src_offset = (src_y + dy) * src_stride + src_x;
+                                    const dst_offset = (dst_y + dy) * width + dst_x;
 
-                            @memcpy(this.fb[dst_offset..][0..actual_w], src[src_offset..][0..actual_w]);
+                                    @memcpy(this.fb[dst_offset..][0..actual_w], src[src_offset..][0..actual_w]);
+                                }
+                            },
+                            .mask => {
+                                for (0..actual_h) |dy| {
+                                    const src_row = (src_y + dy) * src_stride + src_x;
+                                    const dst_row = (dst_y + dy) * width + dst_x;
+
+                                    for (0..actual_w) |dx| {
+                                        const pixel = src[src_row + dx];
+
+                                        if (pixel != copy.mask) {
+                                            this.fb[dst_row + dx] = pixel;
+                                        }
+                                    }
+                                }
+                            },
+                            _ => return false,
                         }
 
                         return true;
                     },
                     .wrap => {
-                        for (0..copy_h) |dy| {
-                            const wrap_y = @mod(@as(usize, copy.dst_pos.y) + dy, height);
-                            const src_row = (src_y + dy) * src_stride + src_x;
+                        switch (copy.alpha) {
+                            .ignore => {
+                                for (0..copy_h) |dy| {
+                                    const wrap_y = @mod(@as(usize, copy.dst_pos.y) + dy, height);
+                                    const src_row = (src_y + dy) * src_stride + src_x;
 
-                            for (0..copy_w) |dx| {
-                                const wrap_x = @mod(@as(usize, copy.dst_pos.x) + dx, width);
+                                    for (0..copy_w) |dx| {
+                                        const wrap_x = @mod(@as(usize, copy.dst_pos.x) + dx, width);
 
-                                this.fb[wrap_y * width + wrap_x] = src[src_row + dx];
-                            }
+                                        this.fb[wrap_y * width + wrap_x] = src[src_row + dx];
+                                    }
+                                }
+                            },
+                            .mask => {
+                                for (0..copy_h) |dy| {
+                                    const wrap_y = @mod(@as(usize, copy.dst_pos.y) + dy, height);
+                                    const src_row = (src_y + dy) * src_stride + src_x;
+
+                                    for (0..copy_w) |dx| {
+                                        const pixel = src[src_row + dx];
+
+                                        if (pixel != copy.mask) {
+                                            const wrap_x = @mod(@as(usize, copy.dst_pos.x) + dx, width);
+
+                                            this.fb[wrap_y * width + wrap_x] = pixel;
+                                        }
+                                    }
+                                }
+                            },
+                            _ => return false,
                         }
 
                         return true;
