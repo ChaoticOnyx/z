@@ -1915,6 +1915,122 @@ pub const Vga = struct {
     }
 };
 
+pub const PrizeBox = struct {
+    pub const NativeCommand = enum(u8) {
+        vend = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.num(@intFromEnum(this));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        ready_status = 1,
+        is_empty = 2,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.PrizeBox = .{},
+
+    pub inline fn reset(this: *PrizeBox) void {
+        this.mmio = .{};
+    }
+
+    pub inline fn mmioRead(this: *PrizeBox, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        return genericMmioRead(&this.mmio, offset, sdk.PrizeBox);
+    }
+
+    pub inline fn mmioWrite(this: *PrizeBox, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.PrizeBox, "_config")...(@offsetOf(sdk.PrizeBox, "_config") + sizeOfField(sdk.PrizeBox, "_config") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.PrizeBox, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.PrizeBox, "_action")...(@offsetOf(sdk.PrizeBox, "_action") + sizeOfField(sdk.PrizeBox, "_action") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.PrizeBox, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.PrizeBox.Action, "ack") => {
+                        this.mmio._status.last_event = .{};
+                        machine.updateExternalInterrupts();
+
+                        return true;
+                    },
+                    @offsetOf(sdk.PrizeBox.Action, "vend") => {
+                        if (!this.mmio._status.ready) {
+                            return false;
+                        }
+
+                        if (this.mmio._status.empty) {
+                            return false;
+                        }
+
+                        return machine.tryCallSyscallProc(&.{ x.num(slot), NativeCommand.vend.byond() });
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    pub fn syscall(this: *PrizeBox, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+        _ = machine;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .ready_status => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.ready = x.ByondValue_IsTrue(&args[1]);
+
+                return x.True();
+            },
+            .is_empty => {
+                if (args.len != 2) {
+                    return x.False();
+                }
+
+                this.mmio._status.empty = x.ByondValue_IsTrue(&args[1]);
+
+                return x.True();
+            },
+            else => return x.False(),
+        }
+    }
+
+    pub inline fn isInterruptPending(this: *PrizeBox, slot: u8, machine: *Machine) bool {
+        _ = slot;
+        _ = machine;
+
+        if (this.mmio._config.interrupts.on_ready and this.mmio._status.last_event.ty == .ready) {
+            return true;
+        }
+
+        return false;
+    }
+};
+
 const Device = union(enum) {
     none,
     tts: Tts,
@@ -1924,10 +2040,11 @@ const Device = union(enum) {
     light: Light,
     env_sensor: EnvSensor,
     vga: Vga,
+    prize_box: PrizeBox,
 
     pub inline fn worker(this: *Device, slot: u8, machine: *Machine) void {
         switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => {},
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => {},
             .vga => this.vga.worker(slot, machine),
         }
     }
@@ -1935,14 +2052,14 @@ const Device = union(enum) {
     // Caller should lock the machine.
     pub inline fn requiresWorker(this: *Device, slot: u8, machine: *Machine) bool {
         return switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => false,
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => false,
             .vga => this.vga.requiresWorker(slot, machine),
         };
     }
 
     pub inline fn update(this: *Device, slot: u8, machine: *Machine, delta_us: u32) void {
         switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor => {},
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => {},
             .vga => this.vga.update(slot, machine, delta_us),
         }
     }
@@ -1957,6 +2074,7 @@ const Device = union(enum) {
             .light => return this.light.mmioRead(slot, machine, offset),
             .env_sensor => return this.env_sensor.mmioRead(slot, machine, offset),
             .vga => return this.vga.mmioRead(slot, machine, offset),
+            .prize_box => return this.prize_box.mmioRead(slot, machine, offset),
         };
     }
 
@@ -1969,12 +2087,13 @@ const Device = union(enum) {
             .light => return this.light.mmioWrite(slot, machine, offset, value),
             .env_sensor => return this.env_sensor.mmioWrite(slot, machine, offset, value),
             .vga => return this.vga.mmioWrite(slot, machine, offset, value),
+            .prize_box => return this.prize_box.mmioWrite(slot, machine, offset, value),
         };
     }
 
     pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         return switch (this.*) {
-            .none, .signaler, .gps, .light, .env_sensor => return false,
+            .none, .signaler, .gps, .light, .env_sensor, .prize_box => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
             .vga => return this.vga.executeDma(slot, machine, cfg),
@@ -1990,6 +2109,7 @@ const Device = union(enum) {
             .light => return this.light.syscall(slot, machine, args),
             .env_sensor => return this.env_sensor.syscall(slot, machine, args),
             .vga => return this.vga.syscall(slot, machine, args),
+            .prize_box => return this.prize_box.syscall(slot, machine, args),
         };
     }
 
@@ -2002,6 +2122,7 @@ const Device = union(enum) {
             .light => return this.light.isInterruptPending(slot, machine),
             .env_sensor => return this.env_sensor.isInterruptPending(slot, machine),
             .vga => return this.vga.isInterruptPending(slot, machine),
+            .prize_box => return this.prize_box.isInterruptPending(slot, machine),
         };
     }
 
@@ -2015,6 +2136,7 @@ const Device = union(enum) {
             .light => return @sizeOf(sdk.Light),
             .env_sensor => return @sizeOf(sdk.EnvSensor),
             .vga => return @sizeOf(sdk.Vga),
+            .prize_box => return @sizeOf(sdk.PrizeBox),
         };
     }
 
@@ -2028,6 +2150,7 @@ const Device = union(enum) {
             .light => .light,
             .env_sensor => .env_sensor,
             .vga => .vga,
+            .prize_box => .prize_box,
         };
     }
 
@@ -2040,12 +2163,13 @@ const Device = union(enum) {
             .light => this.light.reset(),
             .env_sensor => this.env_sensor.reset(),
             .vga => this.vga.reset(),
+            .prize_box => this.prize_box.reset(),
         }
     }
 
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
-            .none, .tts, .signaler, .gps, .light, .env_sensor => {},
+            .none, .tts, .signaler, .gps, .light, .env_sensor, .prize_box => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
             .vga => this.vga.deinit(allocator),
         }
@@ -3296,6 +3420,7 @@ pub const State = struct {
                     return MachineAttachPciError.OutOfMemory;
                 },
             },
+            .prize_box => .{ .prize_box = .{} },
         };
 
         return machine.tryAttachPci(device);

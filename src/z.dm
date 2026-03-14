@@ -130,6 +130,7 @@ var/__z_name = null
 #define Z_DEVICE_TYPE_LIGHT 5
 #define Z_DEVICE_TYPE_ENV_SENSOR 6
 #define Z_DEVICE_TYPE_VGA 7
+#define Z_DEVICE_TYPE_PRIZE_BOX 8
 
 #define Z_TTS_N2B_CMD_SAY 1
 #define Z_TTS_B2N_CMD_READY_STATUS 1
@@ -161,6 +162,10 @@ var/__z_name = null
 #define Z_VGA_MAX_WIDTH 640
 #define Z_VGA_MAX_HEIGHT 480
 #define Z_VGA_MAX_PIXELS (Z_VGA_MAX_WIDTH * Z_VGA_MAX_HEIGHT)
+
+#define Z_PRIZE_BOX_N2B_CMD_VEND 1
+#define Z_PRIZE_BOX_B2N_CMD_READY_STATUS 1
+#define Z_PRIZE_BOX_B2N_CMD_IS_EMPTY 2
 
 // All machine IDs are numeric handles returned by Z_MACHINE_CREATE.
 
