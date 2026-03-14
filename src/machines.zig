@@ -1173,7 +1173,12 @@ pub const Vga = struct {
     }
 
     pub inline fn update(this: *Vga, slot: u8, machine: *Machine, delta_us: u32) void {
-        const freq_s: f32 = 1.0 / @as(f32, @floatFromInt(this.mmio._config.resolution.fps()));
+        const max_fps = if (this.mmio._config.max_fps == 0)
+            this.mmio._config.resolution.maxFps()
+        else
+            @min(this.mmio._config.max_fps, this.mmio._config.resolution.maxFps());
+
+        const freq_s: f32 = 1.0 / @as(f32, @floatFromInt(max_fps));
         const freq_us: u32 = @intFromFloat(freq_s * std.time.us_per_s);
 
         this.elapsed_from_vblank_us +|= delta_us;
