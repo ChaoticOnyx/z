@@ -2033,7 +2033,7 @@ pub const PrizeBox = struct {
         }
     }
 
-    pub fn syscall(this: *PrizeBox, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+    pub inline fn syscall(this: *PrizeBox, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
         _ = slot;
         _ = machine;
 
@@ -2076,6 +2076,193 @@ pub const PrizeBox = struct {
     }
 };
 
+pub const MiningBlock = struct {
+    pub const NativeCommand = enum(u8) {
+        found = 1,
+
+        pub inline fn byond(this: NativeCommand) x.ByondValue {
+            return x.num(@intFromEnum(this));
+        }
+    };
+
+    pub const ByondCommand = enum(u8) {
+        set_args = 1,
+        _,
+
+        pub inline fn byond(v: *const x.ByondValue) ByondCommand {
+            const raw: u32 = @intFromFloat(x.ByondValue_GetNum(v));
+
+            return std.enums.fromInt(ByondCommand, @as(u8, @truncate(raw))).?;
+        }
+    };
+
+    mmio: sdk.MiningBlock = .{},
+
+    pub inline fn mmioRead(this: *MiningBlock, slot: u8, machine: *Machine, offset: usize) ?u8 {
+        _ = slot;
+        _ = machine;
+
+        return genericMmioRead(&this.mmio, offset, sdk.MiningBlock);
+    }
+
+    pub inline fn mmioWrite(this: *MiningBlock, slot: u8, machine: *Machine, offset: usize, value: u8) bool {
+        switch (offset) {
+            @offsetOf(sdk.MiningBlock, "_config")...(@offsetOf(sdk.MiningBlock, "_config") + sizeOfField(sdk.MiningBlock, "_config") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.MiningBlock, "_config");
+                const bytes = std.mem.asBytes(&this.mmio._config);
+
+                bytes[rel_offset] = value;
+                machine.updateExternalInterrupts();
+
+                return true;
+            },
+            @offsetOf(sdk.MiningBlock, "_action")...(@offsetOf(sdk.MiningBlock, "_action") + sizeOfField(sdk.MiningBlock, "_action") - 1) => {
+                const rel_offset = offset - @offsetOf(sdk.MiningBlock, "_action");
+
+                switch (rel_offset) {
+                    @offsetOf(sdk.MiningBlock.Action, "send") => {
+                        if (this.checkValue()) {
+                            _ = machine.tryCallSyscallProc(&.{
+                                x.num(slot),
+                                NativeCommand.found.byond(),
+                            });
+                        } else {
+                            const penalty: u32 = switch (this.mmio._status.args.proof_of_work.hash) {
+                                .fnv1a => 20000,
+                                .murmur_hash3 => 15000,
+                                .xx_hash => 10000,
+                                .blake2s => 7000,
+                                .sha256 => 5000,
+                                else => 10000,
+                            };
+
+                            machine.idle_executed += penalty;
+                        }
+
+                        return true;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+
+    inline fn checkValue(this: *MiningBlock) bool {
+        const value = this.mmio._config.value;
+        this.mmio._status.is_last_value_ok = false;
+
+        switch (this.mmio._status.algorithm) {
+            .proof_of_work => {
+                const seed = this.mmio._status.args.proof_of_work.seed;
+                const difficulty = this.mmio._status.args.proof_of_work.difficulty;
+
+                var input: [8]u8 = undefined;
+                std.mem.writeInt(u32, input[0..4], seed, .little);
+                std.mem.writeInt(u32, input[4..8], value, .little);
+
+                const hash_result: u32 = switch (this.mmio._status.args.proof_of_work.hash) {
+                    .fnv1a => blk: {
+                        var hash = std.hash.Fnv1a_32.init();
+                        hash.update(&input);
+
+                        break :blk hash.final();
+                    },
+                    .murmur_hash3 => std.hash.Murmur2_32.hash(&input),
+                    .blake2s => blk: {
+                        var hash: std.crypto.hash.blake2.Blake2s(32) = .init(.{});
+                        hash.update(&input);
+
+                        var out: [4]u8 = undefined;
+                        hash.final(&out);
+
+                        break :blk std.mem.readInt(u32, &out, .little);
+                    },
+                    .xx_hash => blk: {
+                        var hash = std.hash.XxHash32.init(0);
+                        hash.update(&input);
+
+                        break :blk hash.final();
+                    },
+                    .sha256 => blk: {
+                        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+                        hash.update(&input);
+
+                        break :blk std.mem.readInt(u32, hash.finalResult()[0..4], .little);
+                    },
+                    else => return false,
+                };
+
+                const ok = hash_result < difficulty;
+                this.mmio._status.is_last_value_ok = ok;
+
+                return ok;
+            },
+            else => return false,
+        }
+
+        return false;
+    }
+
+    pub inline fn syscall(this: *MiningBlock, slot: u8, machine: *Machine, args: []const x.ByondValue) x.ByondValue {
+        _ = slot;
+        _ = machine;
+
+        if (args.len == 0) {
+            return x.False();
+        }
+
+        switch (ByondCommand.byond(&args[0])) {
+            .set_args => {
+                if (args.len < 2) {
+                    return x.False();
+                }
+
+                const raw_algorithm = @as(u32, @intFromFloat(x.ByondValue_GetNum(&args[1])));
+                const algorithm: sdk.MiningBlock.Algorithm = @enumFromInt(raw_algorithm);
+
+                switch (algorithm) {
+                    .proof_of_work => {
+                        if (args.len != 5) {
+                            return x.False();
+                        }
+
+                        const raw_hash = @as(u32, @intFromFloat(x.ByondValue_GetNum(&args[2])));
+                        const hash: sdk.MiningBlock.Args.PoWHash = @enumFromInt(raw_hash);
+
+                        switch (hash) {
+                            _ => {
+                                return x.False();
+                            },
+                            else => {},
+                        }
+
+                        const seed: u32 = @intFromFloat(x.ByondValue_GetNum(&args[3]));
+                        const difficulty: u32 = @intFromFloat(x.ByondValue_GetNum(&args[4]));
+
+                        this.mmio._status.algorithm = algorithm;
+                        this.mmio._status.args = .{
+                            .proof_of_work = .{
+                                .hash = hash,
+                                .seed = seed,
+                                .difficulty = difficulty,
+                            },
+                        };
+
+                        return x.True();
+                    },
+                    else => return x.False(),
+                }
+            },
+            else => return x.False(),
+        }
+    }
+
+    pub inline fn reset(this: *MiningBlock) void {
+        this.mmio = .{};
+    }
+};
+
 const Device = union(enum) {
     none,
     tts: Tts,
@@ -2086,10 +2273,11 @@ const Device = union(enum) {
     env_sensor: EnvSensor,
     vga: Vga,
     prize_box: PrizeBox,
+    mining_block: MiningBlock,
 
     pub inline fn worker(this: *Device, slot: u8, machine: *Machine) void {
         switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => {},
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box, .mining_block => {},
             .vga => this.vga.worker(slot, machine),
         }
     }
@@ -2097,14 +2285,14 @@ const Device = union(enum) {
     // Caller should lock the machine.
     pub inline fn requiresWorker(this: *Device, slot: u8, machine: *Machine) bool {
         return switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => false,
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box, .mining_block => false,
             .vga => this.vga.requiresWorker(slot, machine),
         };
     }
 
     pub inline fn update(this: *Device, slot: u8, machine: *Machine, delta_us: u32) void {
         switch (this.*) {
-            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box => {},
+            .none, .tts, .serial_terminal, .signaler, .gps, .light, .env_sensor, .prize_box, .mining_block => {},
             .vga => this.vga.update(slot, machine, delta_us),
         }
     }
@@ -2120,6 +2308,7 @@ const Device = union(enum) {
             .env_sensor => return this.env_sensor.mmioRead(slot, machine, offset),
             .vga => return this.vga.mmioRead(slot, machine, offset),
             .prize_box => return this.prize_box.mmioRead(slot, machine, offset),
+            .mining_block => return this.mining_block.mmioRead(slot, machine, offset),
         };
     }
 
@@ -2133,12 +2322,13 @@ const Device = union(enum) {
             .env_sensor => return this.env_sensor.mmioWrite(slot, machine, offset, value),
             .vga => return this.vga.mmioWrite(slot, machine, offset, value),
             .prize_box => return this.prize_box.mmioWrite(slot, machine, offset, value),
+            .mining_block => return this.mining_block.mmioWrite(slot, machine, offset, value),
         };
     }
 
     pub inline fn executeDma(this: *Device, slot: u8, machine: *Machine, cfg: sdk.Dma.Config) bool {
         return switch (this.*) {
-            .none, .signaler, .gps, .light, .env_sensor, .prize_box => return false,
+            .none, .signaler, .gps, .light, .env_sensor, .prize_box, .mining_block => return false,
             .tts => return this.tts.executeDma(slot, machine, cfg),
             .serial_terminal => return this.serial_terminal.executeDma(slot, machine, cfg),
             .vga => return this.vga.executeDma(slot, machine, cfg),
@@ -2155,12 +2345,13 @@ const Device = union(enum) {
             .env_sensor => return this.env_sensor.syscall(slot, machine, args),
             .vga => return this.vga.syscall(slot, machine, args),
             .prize_box => return this.prize_box.syscall(slot, machine, args),
+            .mining_block => return this.mining_block.syscall(slot, machine, args),
         };
     }
 
     pub inline fn isInterruptPending(this: *Device, slot: u8, machine: *Machine) bool {
         return switch (this.*) {
-            .none, .gps => return false,
+            .none, .gps, .mining_block => return false,
             .tts => return this.tts.isInterruptPending(slot, machine),
             .serial_terminal => return this.serial_terminal.isInterruptPending(slot, machine),
             .signaler => return this.signaler.isInterruptPending(slot, machine),
@@ -2182,6 +2373,7 @@ const Device = union(enum) {
             .env_sensor => return @sizeOf(sdk.EnvSensor),
             .vga => return @sizeOf(sdk.Vga),
             .prize_box => return @sizeOf(sdk.PrizeBox),
+            .mining_block => return @sizeOf(sdk.MiningBlock),
         };
     }
 
@@ -2196,6 +2388,7 @@ const Device = union(enum) {
             .env_sensor => .env_sensor,
             .vga => .vga,
             .prize_box => .prize_box,
+            .mining_block => .mining_block,
         };
     }
 
@@ -2209,12 +2402,13 @@ const Device = union(enum) {
             .env_sensor => this.env_sensor.reset(),
             .vga => this.vga.reset(),
             .prize_box => this.prize_box.reset(),
+            .mining_block => this.mining_block.reset(),
         }
     }
 
     pub inline fn deinit(this: *Device, allocator: std.mem.Allocator) void {
         switch (this.*) {
-            .none, .tts, .signaler, .gps, .light, .env_sensor, .prize_box => {},
+            .none, .tts, .signaler, .gps, .light, .env_sensor, .prize_box, .mining_block => {},
             .serial_terminal => this.serial_terminal.deinit(allocator),
             .vga => this.vga.deinit(allocator),
         }
@@ -3466,6 +3660,7 @@ pub const State = struct {
                 },
             },
             .prize_box => .{ .prize_box = .{} },
+            .mining_block => .{ .mining_block = .{} },
         };
 
         return machine.tryAttachPci(device);
