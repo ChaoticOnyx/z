@@ -69,11 +69,9 @@ const State = struct {
     allocator: std.mem.Allocator,
     mstate: machines.State,
     wsstate: ws.State,
-    pool: std.Thread.Pool,
     last_error: ?[:0]const u8 = null,
 
     pub inline fn deinit(this: *State) void {
-        this.pool.deinit();
         this.mstate.deinit();
         this.wsstate.deinit();
 
@@ -99,16 +97,10 @@ pub inline fn getState() *State {
                 std.heap.smp_allocator,
             .mstate = undefined,
             .wsstate = undefined,
-            .pool = undefined,
         };
 
         _state.?.mstate = .init(_state.?.allocator);
         _state.?.wsstate = .init(_state.?.allocator);
-        _state.?.pool.init(.{
-            .allocator = _state.?.allocator,
-        }) catch |err| {
-            std.debug.panic("Failed to initialize the worker pool: {t}", .{err});
-        };
 
         if (comptime options.profiler) {
             tracy.initGlobal(_state.?.allocator) catch |err| {
