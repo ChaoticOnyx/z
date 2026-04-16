@@ -262,6 +262,20 @@ var/__z_name = null
 /// Lower = more time for game logic, higher = faster emulation.
 #define Z_MACHINES_SET_BUDGET(PERCENT) call_ext(__z_name, "byond:Z_machines_set_budget")(PERCENT)
 
+// Lua Machines
+
+#define Z_MACHINE_L_CREATE(SRC, RAM_SIZE) call_ext(__z_name, "byond:Z_machine_l_create")(SRC, RAM_SIZE)
+
+#define Z_MACHINE_L_DESTROY(SRC) call_ext(__z_name, "byond:Z_machine_l_destroy")(SRC)
+
+#define Z_MACHINES_L_TICK(...) call_ext(__z_name, "byond:Z_machines_l_tick")()
+
+#define Z_MACHINE_L_LOAD_EEPROM(SRC, CONTENT) call_ext(__z_name, "byond:Z_machine_l_load_eeprom")(SRC, CONTENT)
+
+#define Z_MACHINE_L_SET_STATE(SRC, STATE) call_ext(__z_name, "byond:Z_machine_l_set_state")(SRC, STATE)
+
+#define Z_MACHINE_L_GET_STATE(SRC) call_ext(__z_name, "byond:Z_machine_l_get_state")(SRC)
+
 // Crypto
 
 /// Generates a LEN bytes and encodes them in url-safe base64 string without padding.

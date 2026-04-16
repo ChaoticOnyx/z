@@ -47,6 +47,12 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .optimize = optimize,
     });
 
+    const zlua = b.dependency("zlua", .{
+        .target = target,
+        .optimize = optimize,
+        .lang = .luau,
+    });
+
     const options = b.addOptions();
     options.addOption(bool, "profiler", profiler);
 
@@ -55,11 +61,13 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .link_libcpp = true,
         .strip = optimize != .Debug,
         .imports = &.{
             .{ .name = "ondatra", .module = ondatra.module("ondatra") },
             .{ .name = "mcu_sdk", .module = mcu_sdk.module("mcu_sdk") },
             .{ .name = "options", .module = options.createModule() },
+            .{ .name = "zlua", .module = zlua.module("zlua") },
         },
     });
 

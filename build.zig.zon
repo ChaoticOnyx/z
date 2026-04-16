@@ -12,6 +12,10 @@
             .url = "git+https://github.com/igorsaux/mcu-sdk#1daa2a4d03dedc2df892f219a223e0dfce34050b",
             .hash = "mcu_sdk-0.0.0-5CQyuoi7AADCcnfnXJL7NgAT1Wd9Gj3r0boOJyQ1ZhC0",
         },
+        .zlua = .{
+            .url = "git+https://github.com/natecraddock/ziglua?ref=zig-0.15.2#b6e895f73e55d793e61844a8bab17a036631f6be",
+            .hash = "zlua-0.1.0-hGRpCxFDBQBTLH7HYIvzCfvr_8xFE6kqLzLFxkcgdWNl",
+        },
     },
 
     .paths = .{

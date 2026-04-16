@@ -9,6 +9,7 @@ const options = @import("options");
 const crypto = @import("crypto.zig");
 const logger = @import("logger.zig");
 const machines = @import("machines.zig");
+const machines_lua = @import("machines_lua.zig");
 const os = @import("os.zig");
 const tracy = @import("tracy.zig");
 const ws = @import("ws.zig");
@@ -68,11 +69,13 @@ fn panicFn(msg: []const u8, rt: ?usize) noreturn {
 const State = struct {
     allocator: std.mem.Allocator,
     mstate: machines.State,
+    mlstate: machines_lua.State,
     wsstate: ws.State,
     last_error: ?[:0]const u8 = null,
 
     pub inline fn deinit(this: *State) void {
         this.mstate.deinit();
+        this.mlstate.deinit();
         this.wsstate.deinit();
 
         if (comptime options.profiler) {
@@ -96,10 +99,12 @@ pub inline fn getState() *State {
             else
                 std.heap.smp_allocator,
             .mstate = undefined,
+            .mlstate = undefined,
             .wsstate = undefined,
         };
 
         _state.?.mstate = .init(_state.?.allocator);
+        _state.?.mlstate = .init(_state.?.allocator);
         _state.?.wsstate = .init(_state.?.allocator);
 
         if (comptime options.profiler) {
@@ -180,5 +185,72 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnT
 comptime {
     _ = crypto;
     _ = machines;
+    _ = machines_lua;
     _ = ws;
+}
+
+extern const __CTOR_LIST__: anyopaque;
+extern const __DTOR_LIST__: anyopaque;
+
+pub fn globalCtors() void {
+    const ptr: [*]const usize = @ptrCast(@alignCast(&__CTOR_LIST__));
+
+    var nptrs = ptr[0];
+
+    if (nptrs == std.math.maxInt(usize)) {
+        nptrs = 0;
+
+        while (ptr[nptrs + 1] != 0) : (nptrs += 1) {}
+    }
+
+    var i: usize = nptrs;
+
+    while (i >= 1) : (i -= 1) {
+        const ctor: *const fn () callconv(.c) void = @ptrFromInt(ptr[i]);
+
+        ctor();
+    }
+}
+
+pub fn globalDtors() void {
+    const ptr: [*]const usize = @ptrCast(@alignCast(&__DTOR_LIST__));
+    var nptrs = ptr[0];
+
+    if (nptrs == std.math.maxInt(usize)) {
+        nptrs = 0;
+
+        while (ptr[nptrs + 1] != 0) : (nptrs += 1) {}
+    }
+
+    var i: usize = 1;
+
+    while (i <= nptrs) : (i += 1) {
+        const dtor: *const fn () callconv(.c) void = @ptrFromInt(ptr[i]);
+
+        dtor();
+    }
+}
+
+const DLL_PROCESS_ATTACH: std.os.windows.DWORD = 1;
+const DLL_PROCESS_DETACH: std.os.windows.DWORD = 0;
+
+pub export fn DllMain(
+    hinst_dll: std.os.windows.HINSTANCE,
+    fdw_reason: std.os.windows.DWORD,
+    lpv_reserved: std.os.windows.LPVOID,
+) std.os.windows.BOOL {
+    _ = hinst_dll;
+    _ = lpv_reserved;
+
+    switch (fdw_reason) {
+        DLL_PROCESS_ATTACH => {
+            globalCtors();
+        },
+        DLL_PROCESS_DETACH => {
+            globalDtors();
+        },
+        else => {},
+    }
+
+    return std.os.windows.TRUE;
 }
