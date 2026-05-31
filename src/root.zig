@@ -7,9 +7,10 @@ const builtin = @import("builtin");
 const options = @import("options");
 
 const crypto = @import("crypto.zig");
+const hash = @import("hash.zig");
 const logger = @import("logger.zig");
-const machines = @import("machines.zig");
 const os = @import("os.zig");
+const scripting = @import("scripting.zig");
 const tracy = @import("tracy.zig");
 const ws = @import("ws.zig");
 const x = @import("x.zig");
@@ -39,15 +40,15 @@ fn panicFn(msg: []const u8, rt: ?usize) noreturn {
 
 const State = struct {
     allocator: std.mem.Allocator,
-    mstate: machines.State,
     wsstate: ws.State,
+    sstate: scripting.State,
     io: std.Io.Threaded = .init_single_threaded,
     last_error: ?[:0]const u8 = null,
 
     pub inline fn deinit(this: *State) void {
-        this.io.deinit();
-        this.mstate.deinit();
         this.wsstate.deinit();
+        this.sstate.deinit();
+        this.io.deinit();
 
         if (comptime options.profiler) {
             tracy.deinitGlobal();
@@ -69,12 +70,12 @@ pub inline fn getState() *State {
                 _dbg_allocator.allocator()
             else
                 std.heap.smp_allocator,
-            .mstate = undefined,
             .wsstate = undefined,
+            .sstate = undefined,
         };
 
-        _state.?.mstate = .init(_state.?.allocator);
         _state.?.wsstate = .init(_state.?.allocator);
+        _state.?.sstate = .init(_state.?.allocator);
 
         if (comptime options.profiler) {
             tracy.initGlobal(_state.?.allocator) catch |err| {
@@ -153,6 +154,7 @@ pub export fn Z_deinit(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) ReturnT
 
 comptime {
     _ = crypto;
-    _ = machines;
+    _ = hash;
+    _ = scripting;
     _ = ws;
 }

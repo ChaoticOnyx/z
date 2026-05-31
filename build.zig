@@ -43,6 +43,8 @@ fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode, profiler: bool) 
         .root_module = createRootModule(b, .linux, optimize, profiler),
     });
     b.installArtifact(linux_lib);
+
+    b.getInstallStep().dependOn(&b.addInstallHeaderFile(b.path("src/z.dm"), "z.dm").step);
 }
 
 fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.OptimizeMode, profiler: bool) *std.Build.Module {
@@ -53,12 +55,7 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .glibc_version = if (os == .linux) .{ .major = 2, .minor = 17, .patch = 0 } else null,
     });
 
-    const ondatra = b.dependency("ondatra", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const mcu_sdk = b.dependency("mcu_sdk", .{
+    const basic26 = b.dependency("basic26", .{
         .target = target,
         .optimize = optimize,
     });
@@ -73,11 +70,12 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
         .link_libc = true,
         .strip = optimize != .Debug,
         .imports = &.{
-            .{ .name = "ondatra", .module = ondatra.module("ondatra") },
-            .{ .name = "mcu_sdk", .module = mcu_sdk.module("mcu_sdk") },
             .{ .name = "options", .module = options.createModule() },
+            .{ .name = "basic26", .module = basic26.module("basic26") },
         },
     });
+
+    mod.linkLibrary(basic26.artifact("basic26-static"));
 
     if (target.result.os.tag == .windows) {
         mod.linkSystemLibrary("Ws2_32", .{});

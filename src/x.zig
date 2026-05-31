@@ -489,6 +489,13 @@ pub inline fn num(v: u32) ByondValue {
     return value;
 }
 
+pub inline fn numI(v: i32) ByondValue {
+    var value: ByondValue = .{};
+    ByondValue_SetNum(&value, @floatFromInt(v));
+
+    return value;
+}
+
 pub inline fn True() ByondValue {
     return num(1);
 }
