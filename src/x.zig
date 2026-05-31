@@ -78,26 +78,15 @@ const symbols = .{
 };
 
 pub const Table = blk: {
-    var fields: [symbols.len]std.builtin.Type.StructField = undefined;
+    var field_names: [symbols.len][]const u8 = undefined;
+    var field_types: [symbols.len]type = undefined;
 
     for (symbols, 0..) |sym, i| {
-        fields[i] = .{
-            .name = sym[0],
-            .type = @TypeOf(&sym[1]),
-            .default_value_ptr = null,
-            .is_comptime = false,
-            .alignment = @alignOf(@TypeOf(&sym[1])),
-        };
+        field_names[i] = sym[0];
+        field_types[i] = @TypeOf(&sym[1]);
     }
 
-    break :blk @Type(.{
-        .@"struct" = .{
-            .layout = .auto,
-            .fields = &fields,
-            .decls = &.{},
-            .is_tuple = false,
-        },
-    });
+    break :blk @Struct(.auto, null, &field_names, &field_types, &@splat(.{}));
 };
 
 const is_windows = builtin.os.tag == .windows;

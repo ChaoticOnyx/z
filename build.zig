@@ -29,6 +29,22 @@ pub fn build(b: *std.Build) void {
     createLib(b, optimize, profiler);
 }
 
+fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode, profiler: bool) void {
+    const windows_lib = b.addLibrary(.{
+        .name = "libz",
+        .linkage = .dynamic,
+        .root_module = createRootModule(b, .windows, optimize, profiler),
+    });
+    b.installArtifact(windows_lib);
+
+    const linux_lib = b.addLibrary(.{
+        .name = "libz",
+        .linkage = .dynamic,
+        .root_module = createRootModule(b, .linux, optimize, profiler),
+    });
+    b.installArtifact(linux_lib);
+}
+
 fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.OptimizeMode, profiler: bool) *std.Build.Module {
     const target = b.resolveTargetQuery(.{
         .cpu_arch = .x86,
@@ -65,25 +81,10 @@ fn createRootModule(b: *std.Build, os: std.Target.Os.Tag, optimize: std.builtin.
 
     if (target.result.os.tag == .windows) {
         mod.linkSystemLibrary("Ws2_32", .{});
+        mod.linkSystemLibrary("kernel32", .{});
     }
 
     mod.addIncludePath(b.path("src/"));
 
     return mod;
-}
-
-fn createLib(b: *std.Build, optimize: std.builtin.OptimizeMode, profiler: bool) void {
-    const windows_lib = b.addLibrary(.{
-        .name = "libz",
-        .linkage = .dynamic,
-        .root_module = createRootModule(b, .windows, optimize, profiler),
-    });
-    b.installArtifact(windows_lib);
-
-    const linux_lib = b.addLibrary(.{
-        .name = "libz",
-        .linkage = .dynamic,
-        .root_module = createRootModule(b, .linux, optimize, profiler),
-    });
-    b.installArtifact(linux_lib);
 }

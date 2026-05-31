@@ -1500,7 +1500,7 @@ const Machine = struct {
         const ram: []u8 = &.{};
 
         var prng_seed: u64 = 0;
-        std.posix.getrandom(std.mem.asBytes(&prng_seed)) catch {};
+        std.Io.random(z.getState().io.io(), std.mem.asBytes(&prng_seed));
 
         return .{
             .id = id,
@@ -2423,9 +2423,9 @@ pub const State = struct {
 
     pub inline fn machineSetFrequency(this: *State, id: Machine.Id, frequency: u32) MachineSetFrequencyError!void {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         machine.frequency = frequency;
@@ -2433,9 +2433,9 @@ pub const State = struct {
 
     pub inline fn machineSetState(this: *State, id: Machine.Id, state: u32) MachineSetStateError!void {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         machine.state = std.enums.fromInt(Machine.State, state) orelse {
@@ -2447,9 +2447,9 @@ pub const State = struct {
 
     pub inline fn machineGetState(this: *State, id: Machine.Id) MachineGetStateError!Machine.State {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         return machine.state;
@@ -2457,9 +2457,9 @@ pub const State = struct {
 
     pub inline fn machineGetUtilization(this: *State, id: Machine.Id) MachineGetUtilizationError!f32 {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         return machine.utilization;
@@ -2467,9 +2467,9 @@ pub const State = struct {
 
     pub inline fn machineGetExecuted(this: *State, id: Machine.Id) MachineGetExecutedError!u64 {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         return machine.executed;
@@ -2477,9 +2477,9 @@ pub const State = struct {
 
     pub inline fn machineSetSensors(this: *State, id: Machine.Id, temperature: i16, overheat: bool, throttled: bool) MachineSetSensorsError!void {
         const machine = this.findMachine(id) orelse {
-            z.getState().last_error = @errorName(MachineSetRamSizeError.MachineNotFound);
+            z.getState().last_error = @errorName(error.MachineNotFound);
 
-            return MachineSetRamSizeError.MachineNotFound;
+            return error.MachineNotFound;
         };
 
         machine.sensors = .{
@@ -2551,7 +2551,7 @@ pub const State = struct {
             return MachineLoadElfError.MachineNotFound;
         };
 
-        const file_content = std.fs.cwd().readFileAlloc(this.allocator, path, MAX_FILE_SIZE) catch |err| switch (err) {
+        const file_content = std.Io.Dir.cwd().readFileAlloc(z.getState().io.io(), path, this.allocator, .limited(MAX_FILE_SIZE)) catch |err| switch (err) {
             error.FileNotFound => {
                 z.getState().last_error = @errorName(MachineLoadElfError.FileNotFound);
 
@@ -2666,8 +2666,10 @@ pub const State = struct {
     }
 
     pub inline fn tick(this: *State, delta_us: u32) void {
+        const io = z.getState().io.io();
+
         const wall_budget_us: i64 = @divFloor(@as(i64, delta_us) * this.budget_percent, 100);
-        const wall_start = std.time.microTimestamp();
+        const wall_start = std.Io.Timestamp.now(io, .real).toMicroseconds();
 
         if (this.machines.items.len == 0) {
             this.updateStats(wall_start, delta_us);
@@ -2675,7 +2677,7 @@ pub const State = struct {
             return;
         }
 
-        const timestamp: u64 = sdk.utils.DateTime.decompose(@bitCast(os.Timezone.getLocal().applyTo(std.time.timestamp()))).addYears(544).toTimestamp();
+        const timestamp: u64 = sdk.utils.DateTime.decompose(@bitCast(os.Timezone.getLocal().applyTo(std.Io.Timestamp.now(io, .real).toSeconds()))).addYears(544).toTimestamp();
         var served: usize = 0;
 
         while (served < this.machines.items.len) : (served += 1) {
@@ -2690,7 +2692,7 @@ pub const State = struct {
                 continue;
             }
 
-            const wall_elapsed = std.time.microTimestamp() - wall_start;
+            const wall_elapsed = std.Io.Timestamp.now(io, .real).toMicroseconds() - wall_start;
 
             if (wall_elapsed >= wall_budget_us) {
                 var j = served;
@@ -2816,7 +2818,7 @@ pub const State = struct {
     }
 
     inline fn updateStats(this: *State, wall_start: i64, delta_us: u32) void {
-        const wall_us: u64 = @intCast(std.time.microTimestamp() - wall_start);
+        const wall_us: u64 = @intCast(std.Io.Timestamp.now(z.getState().io.io(), .real).toMicroseconds() - wall_start);
         const budget_us: u64 = @as(u64, delta_us) * this.budget_percent / 100;
 
         this.stats.last_wall_us = wall_us;

@@ -2,55 +2,268 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const std = @import("std");
+pub const socklen_t = std.c.socklen_t;
 const builtin = @import("builtin");
 
 const libws = @import("libws.zig");
+const z = @import("root.zig");
 
 pub const is_windows = builtin.os.tag == .windows;
 pub const is_linux = builtin.os.tag == .linux;
 
-const c = @cImport({
-    @cInclude("time.h");
+// Linux socket / network constants
+const AF_INET: c_int = 2;
+const SOCK_STREAM: c_int = 1;
+const IPPROTO_TCP: c_int = 6;
 
-    if (is_windows) {
-        @cDefine("_WIN32_WINNT", "0x0600");
-        @cDefine("WIN32_LEAN_AND_MEAN", "1");
-        @cInclude("winsock2.h");
-        @cInclude("ws2tcpip.h");
-        @cInclude("windows.h");
+// SOL_SOCKET and SO_REUSEADDR have different values on Windows and Linux
+const SOL_SOCKET: c_int = if (is_windows) 0xFFFF else 1;
+const SO_REUSEADDR: c_int = if (is_windows) 0x0004 else 2;
+
+const TCP_NODELAY: c_int = 1;
+const MSG_NOSIGNAL: c_int = 16384;
+const F_GETFL: c_int = 3;
+const F_SETFL: c_int = 4;
+const O_NONBLOCK: c_int = 2048;
+
+// Linux errno constants
+const EAGAIN: c_int = 11;
+const EWOULDBLOCK: c_int = 11;
+const EINPROGRESS: c_int = 115;
+const ECONNRESET: c_int = 104;
+const ECONNREFUSED: c_int = 111;
+const EPIPE: c_int = 32;
+const EINTR: c_int = 4;
+
+// Windows WSA error constants
+const WSAEWOULDBLOCK: c_int = 10035;
+const WSAECONNRESET: c_int = 10054;
+const WSAECONNREFUSED: c_int = 10061;
+const WSAEINPROGRESS: c_int = 10036;
+const WSAEINTR: c_int = 10004;
+
+const INADDR_ANY: u32 = 0;
+
+const winapi_sock = struct {
+    extern "Ws2_32" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) callconv(.winapi) usize;
+    extern "Ws2_32" fn connect(sockfd: usize, addr: *const std.c.sockaddr, addrlen: c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn bind(sockfd: usize, addr: *const std.c.sockaddr, addrlen: c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn listen(sockfd: usize, backlog: c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn accept(sockfd: usize, addr: ?*std.c.sockaddr, addrlen: ?*c_int) callconv(.winapi) usize;
+    extern "Ws2_32" fn setsockopt(sockfd: usize, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn getsockname(sockfd: usize, addr: *std.c.sockaddr, addrlen: *c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn getpeername(sockfd: usize, addr: *std.c.sockaddr, addrlen: *c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn recv(sockfd: usize, buf: ?*anyopaque, len: c_int, flags: c_int) callconv(.winapi) c_int;
+    extern "Ws2_32" fn send(sockfd: usize, buf: *const anyopaque, len: c_int, flags: c_int) callconv(.winapi) c_int;
+};
+
+inline fn w_socket(domain: c_int, sock_type: c_int, protocol: c_int) isize {
+    if (comptime is_windows) {
+        const result = winapi_sock.socket(domain, sock_type, protocol);
+        if (result == ~@as(usize, 0)) {
+            return -1;
+        }
+        return @intCast(result);
     } else {
-        @cInclude("errno.h");
-        @cInclude("sys/socket.h");
-        @cInclude("sys/types.h");
-        @cInclude("netinet/in.h");
-        @cInclude("netinet/tcp.h");
-        @cInclude("arpa/inet.h");
-        @cInclude("unistd.h");
-        @cInclude("fcntl.h");
-        @cInclude("poll.h");
-        @cInclude("sys/time.h");
+        return std.c.socket(domain, sock_type, protocol);
     }
-});
+}
 
-pub const Socket = if (is_windows) c.SOCKET else c_int;
-pub const INVALID_SOCKET: Socket = if (is_windows) ~@as(Socket, 0) else -1;
+inline fn w_connect(sockfd: std.c.fd_t, addr: *const std.c.sockaddr, addrlen: std.c.socklen_t) c_int {
+    if (comptime is_windows) {
+        return winapi_sock.connect(socketToWinsock(sockfd), addr, @intCast(addrlen));
+    } else {
+        return std.c.connect(sockfd, addr, addrlen);
+    }
+}
+
+inline fn w_bind(sockfd: std.c.fd_t, addr: *const std.c.sockaddr, addrlen: std.c.socklen_t) c_int {
+    if (comptime is_windows) {
+        return winapi_sock.bind(socketToWinsock(sockfd), addr, @intCast(addrlen));
+    } else {
+        return std.c.bind(sockfd, addr, addrlen);
+    }
+}
+
+inline fn w_listen(sockfd: std.c.fd_t, backlog: c_int) c_int {
+    if (comptime is_windows) {
+        return winapi_sock.listen(socketToWinsock(sockfd), backlog);
+    } else {
+        return std.c.listen(sockfd, @intCast(backlog));
+    }
+}
+
+inline fn w_accept(sockfd: std.c.fd_t, addr: ?*std.c.sockaddr, addrlen: ?*std.c.socklen_t) isize {
+    if (comptime is_windows) {
+        var win_addrlen: c_int = if (addrlen) |ptr| @intCast(ptr.*) else 0;
+        const result = winapi_sock.accept(
+            socketToWinsock(sockfd),
+            addr,
+            if (addrlen != null) &win_addrlen else null,
+        );
+        if (addrlen != null) {
+            addrlen.?.* = @intCast(win_addrlen);
+        }
+        if (result == ~@as(usize, 0)) {
+            return -1;
+        }
+        return @intCast(result);
+    } else {
+        return std.c.accept(sockfd, addr, addrlen);
+    }
+}
+
+inline fn w_setsockopt(sockfd: std.c.fd_t, level: c_int, optname: c_int, optval: ?*const anyopaque, optlen: std.c.socklen_t) c_int {
+    if (comptime is_windows) {
+        return winapi_sock.setsockopt(socketToWinsock(sockfd), level, optname, optval, @intCast(optlen));
+    } else {
+        return std.c.setsockopt(sockfd, level, @intCast(optname), optval, optlen);
+    }
+}
+
+inline fn w_getsockname(sockfd: std.c.fd_t, addr: *std.c.sockaddr, addrlen: *std.c.socklen_t) c_int {
+    if (comptime is_windows) {
+        var win_addrlen: c_int = @intCast(addrlen.*);
+        const result = winapi_sock.getsockname(socketToWinsock(sockfd), addr, &win_addrlen);
+        addrlen.* = @intCast(win_addrlen);
+        return result;
+    } else {
+        return std.c.getsockname(sockfd, addr, addrlen);
+    }
+}
+
+inline fn w_getpeername(sockfd: std.c.fd_t, addr: *std.c.sockaddr, addrlen: *std.c.socklen_t) c_int {
+    if (comptime is_windows) {
+        var win_addrlen: c_int = @intCast(addrlen.*);
+        const result = winapi_sock.getpeername(socketToWinsock(sockfd), addr, &win_addrlen);
+        addrlen.* = @intCast(win_addrlen);
+        return result;
+    } else {
+        return std.c.getpeername(sockfd, addr, addrlen);
+    }
+}
+
+inline fn w_recv(sockfd: std.c.fd_t, buf: ?*anyopaque, len: usize, flags: c_int) isize {
+    if (comptime is_windows) {
+        return @intCast(winapi_sock.recv(socketToWinsock(sockfd), buf, @intCast(len), flags));
+    } else {
+        return std.c.recv(sockfd, buf, len, flags);
+    }
+}
+
+inline fn w_send(sockfd: std.c.fd_t, buf: *const anyopaque, len: usize, flags: c_int) isize {
+    if (comptime is_windows) {
+        return @intCast(winapi_sock.send(socketToWinsock(sockfd), buf, @intCast(len), flags));
+    } else {
+        return std.c.send(sockfd, buf, len, @intCast(flags));
+    }
+}
+
+const sockaddr_in = extern struct {
+    sin_family: u16,
+    sin_port: u16,
+    sin_addr: extern union {
+        s_addr: u32,
+    },
+    sin_zero: [8]u8,
+};
+
+const timeval = extern struct {
+    tv_sec: isize,
+    tv_usec: isize,
+};
+
+const tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    tm_gmtoff: isize,
+    tm_zone: [*:0]const u8,
+};
+
+extern fn clock_gettime(clockid: c_int, tp: *std.posix.timespec) c_int;
+extern fn gettimeofday(tv: *timeval, tz: ?*anyopaque) c_int;
+extern fn localtime(timer: *const isize) ?*tm;
+extern fn gmtime(timer: *const isize) ?*tm;
+
+const SOCKET = usize;
+
+const WSADATA = extern struct {
+    wVersion: u16,
+    wHighVersion: u16,
+    szDescription: [257]u8,
+    szSystemStatus: [129]u8,
+    iMaxSockets: u16,
+    iMaxUdpDg: u16,
+    lpVendorInfo: ?*u8,
+};
+
+const FILETIME = extern struct {
+    dwLowDateTime: u32,
+    dwHighDateTime: u32,
+};
+
+extern "Ws2_32" fn WSAStartup(wVersionRequired: u16, lpWSAData: *WSADATA) callconv(.winapi) c_int;
+extern "Ws2_32" fn WSACleanup() callconv(.winapi) c_int;
+extern "Ws2_32" fn WSAGetLastError() callconv(.winapi) c_int;
+extern "Ws2_32" fn ioctlsocket(s: SOCKET, cmd: u32, argp: *u32) callconv(.winapi) c_int;
+extern "Ws2_32" fn closesocket(s: SOCKET) callconv(.winapi) c_int;
+
+extern "kernel32" fn GetSystemTimeAsFileTime(lpFileTime: *FILETIME) callconv(.winapi) void;
+
+fn LOBYTE(w: u16) u8 {
+    return @truncate(w);
+}
+fn HIBYTE(w: u16) u8 {
+    return @truncate(w >> 8);
+}
+
+pub const Socket = if (is_windows) ?*anyopaque else std.c.fd_t;
 pub const SOCKET_ERROR: c_int = -1;
 
-pub const socklen_t = if (is_windows) c_int else c.socklen_t;
+/// Convert the c_int returned by socket()/accept() to Socket (fd_t).
+/// On Windows, fd_t is *anyopaque so we need @ptrFromInt; on Linux fd_t is i32 (identity).
+inline fn toSocket(fd: isize) Socket {
+    if (comptime is_windows) {
+        if (fd == -1) {
+            return null;
+        }
 
-const EAGAIN = if (is_linux) c.EAGAIN else 0;
-const EWOULDBLOCK = if (is_linux) c.EWOULDBLOCK else 0;
-const EINPROGRESS = if (is_linux) c.EINPROGRESS else 0;
-const ECONNRESET = if (is_linux) c.ECONNRESET else 0;
-const ECONNREFUSED = if (is_linux) c.ECONNREFUSED else 0;
-const EPIPE = if (is_linux) c.EPIPE else 0;
-const EINTR = if (is_linux) c.EINTR else 0;
+        return @ptrFromInt(@as(usize, @intCast(@as(u32, @bitCast(@as(i32, @intCast(fd)))))));
+    } else {
+        return @intCast(fd);
+    }
+}
 
-const WSAEWOULDBLOCK = if (is_windows) c.WSAEWOULDBLOCK else 0;
-const WSAECONNRESET = if (is_windows) c.WSAECONNRESET else 0;
-const WSAECONNREFUSED = if (is_windows) c.WSAECONNREFUSED else 0;
-const WSAEINPROGRESS = if (is_windows) c.WSAEINPROGRESS else 0;
-const WSAEINTR = if (is_windows) c.WSAEINTR else 0;
+inline fn socketToFd(sock: Socket) std.c.fd_t {
+    if (comptime is_windows) {
+        return sock orelse unreachable;
+    } else {
+        return sock;
+    }
+}
+
+inline fn isInvalidSocket(sock: Socket) bool {
+    if (comptime is_windows) {
+        return sock == null;
+    } else {
+        return sock == -1;
+    }
+}
+
+inline fn socketToWinsock(sock: std.c.fd_t) usize {
+    if (comptime is_windows) {
+        return @intCast(@intFromPtr(sock));
+    } else {
+        @compileError("Should not be called on Linux");
+    }
+}
 
 var wsa_initialized: bool = false;
 var wsa_init_error: bool = false;
@@ -70,8 +283,8 @@ pub inline fn init() InitError!void {
             return;
         }
 
-        var wsa_data: c.WSADATA = undefined;
-        const result = c.WSAStartup(0x0202, &wsa_data);
+        var wsa_data: WSADATA = undefined;
+        const result = WSAStartup(0x0202, &wsa_data);
 
         if (result != 0) {
             wsa_init_error = true;
@@ -80,8 +293,8 @@ pub inline fn init() InitError!void {
         }
 
         // Verify version 2.2
-        if (c.LOBYTE(wsa_data.wVersion) != 2 or c.HIBYTE(wsa_data.wVersion) != 2) {
-            _ = c.WSACleanup();
+        if (LOBYTE(wsa_data.wVersion) != 2 or HIBYTE(wsa_data.wVersion) != 2) {
+            _ = WSACleanup();
             wsa_init_error = true;
 
             return error.WsaVersionNotSupported;
@@ -93,7 +306,7 @@ pub inline fn init() InitError!void {
 
 pub inline fn deinit() void {
     if (is_windows and wsa_initialized) {
-        _ = c.WSACleanup();
+        _ = WSACleanup();
 
         wsa_initialized = false;
     }
@@ -101,9 +314,9 @@ pub inline fn deinit() void {
 
 inline fn getLastError() c_int {
     if (comptime is_windows) {
-        return c.WSAGetLastError();
+        return WSAGetLastError();
     } else {
-        return @intCast(std.c._errno().*);
+        return std.c._errno().*;
     }
 }
 
@@ -175,19 +388,19 @@ const FIONBIO: u32 = 0x8004667E;
 
 inline fn setNonBlocking(sock: Socket) !void {
     if (comptime is_windows) {
-        var mode: c_ulong = 1;
+        var mode: u32 = 1;
 
-        if (c.ioctlsocket(sock, @bitCast(FIONBIO), &mode) == SOCKET_ERROR) {
+        if (ioctlsocket(socketToWinsock(socketToFd(sock)), @bitCast(FIONBIO), &mode) == SOCKET_ERROR) {
             return error.SetOptionFailed;
         }
     } else {
-        const flags = c.fcntl(sock, c.F_GETFL, @as(c_int, 0));
+        const flags = std.c.fcntl(sock, F_GETFL, @as(c_int, 0));
 
         if (flags == -1) {
             return error.SetOptionFailed;
         }
 
-        if (c.fcntl(sock, c.F_SETFL, flags | c.O_NONBLOCK) == -1) {
+        if (std.c.fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
             return error.SetOptionFailed;
         }
     }
@@ -195,10 +408,10 @@ inline fn setNonBlocking(sock: Socket) !void {
 
 inline fn setReuseAddr(sock: Socket) !void {
     var optval: c_int = 1;
-    const result = c.setsockopt(
-        sock,
-        c.SOL_SOCKET,
-        c.SO_REUSEADDR,
+    const result = w_setsockopt(
+        socketToFd(sock),
+        SOL_SOCKET,
+        SO_REUSEADDR,
         @ptrCast(&optval),
         @sizeOf(c_int),
     );
@@ -210,10 +423,10 @@ inline fn setReuseAddr(sock: Socket) !void {
 
 inline fn setNoDelay(sock: Socket) !void {
     var optval: c_int = 1;
-    const result = c.setsockopt(
-        sock,
-        c.IPPROTO_TCP,
-        c.TCP_NODELAY,
+    const result = w_setsockopt(
+        socketToFd(sock),
+        IPPROTO_TCP,
+        TCP_NODELAY,
         @ptrCast(&optval),
         @sizeOf(c_int),
     );
@@ -224,34 +437,26 @@ inline fn setNoDelay(sock: Socket) !void {
 }
 
 inline fn closeSocket(sock: Socket) void {
-    if (sock == INVALID_SOCKET) {
-        return;
-    }
-
+    if (isInvalidSocket(sock)) return;
     if (comptime is_windows) {
-        _ = c.closesocket(sock);
+        _ = closesocket(socketToWinsock(socketToFd(sock)));
     } else {
-        _ = c.close(sock);
+        _ = std.os.linux.close(sock);
     }
 }
 
 pub const Address = struct {
     pub const MAX_STRING_LEN = 21; // "255.255.255.255:65535"
 
-    addr: c.sockaddr_in,
+    addr: sockaddr_in,
 
     pub inline fn init(ip: [4]u8, port: u16) Address {
-        var addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
-        addr.sin_family = c.AF_INET;
+        var addr: sockaddr_in = std.mem.zeroes(sockaddr_in);
+        addr.sin_family = AF_INET;
         addr.sin_port = toBigEndian16(port);
 
         if (comptime is_windows) {
-            addr.sin_addr.S_un.S_un_b = .{
-                .s_b1 = ip[0],
-                .s_b2 = ip[1],
-                .s_b3 = ip[2],
-                .s_b4 = ip[3],
-            };
+            addr.sin_addr.s_addr = @bitCast(@as(u32, ip[0]) | (@as(u32, ip[1]) << 8) | (@as(u32, ip[2]) << 16) | (@as(u32, ip[3]) << 24));
         } else {
             addr.sin_addr.s_addr = @bitCast(ip);
         }
@@ -260,14 +465,14 @@ pub const Address = struct {
     }
 
     pub inline fn any(port: u16) Address {
-        var addr: c.sockaddr_in = std.mem.zeroes(c.sockaddr_in);
-        addr.sin_family = c.AF_INET;
+        var addr: sockaddr_in = std.mem.zeroes(sockaddr_in);
+        addr.sin_family = AF_INET;
         addr.sin_port = toBigEndian16(port);
 
         if (comptime is_windows) {
-            addr.sin_addr.S_un.S_addr = c.INADDR_ANY;
+            addr.sin_addr.s_addr = INADDR_ANY;
         } else {
-            addr.sin_addr.s_addr = c.INADDR_ANY;
+            addr.sin_addr.s_addr = INADDR_ANY;
         }
 
         return .{ .addr = addr };
@@ -283,11 +488,12 @@ pub const Address = struct {
 
     pub inline fn getIp(this: Address) [4]u8 {
         if (comptime is_windows) {
+            const s_addr = this.addr.sin_addr.s_addr;
             return .{
-                this.addr.sin_addr.S_un.S_un_b.s_b1,
-                this.addr.sin_addr.S_un.S_un_b.s_b2,
-                this.addr.sin_addr.S_un.S_un_b.s_b3,
-                this.addr.sin_addr.S_un.S_un_b.s_b4,
+                @truncate(s_addr),
+                @truncate(s_addr >> 8),
+                @truncate(s_addr >> 16),
+                @truncate(s_addr >> 24),
             };
         } else {
             return @bitCast(this.addr.sin_addr.s_addr);
@@ -371,20 +577,22 @@ pub const TcpStream = struct {
     };
 
     pub fn connect(address: Address) ConnectError!TcpStream {
-        const sock = c.socket(c.AF_INET, c.SOCK_STREAM, c.IPPROTO_TCP);
+        const raw_sock = w_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-        if (sock == INVALID_SOCKET) {
+        if (raw_sock == -1) {
             return error.SocketCreateFailed;
         }
+
+        const sock = toSocket(raw_sock);
         errdefer closeSocket(sock);
 
         try setNonBlocking(sock);
         try setNoDelay(sock);
 
-        const result = c.connect(
-            sock,
+        const result = w_connect(
+            socketToFd(sock),
             @ptrCast(&address.addr),
-            @sizeOf(c.sockaddr_in),
+            @sizeOf(sockaddr_in),
         );
 
         if (result == SOCKET_ERROR) {
@@ -411,8 +619,8 @@ pub const TcpStream = struct {
 
     pub fn read(this: *TcpStream, buf: []u8) libws.Stream.ReadError!usize {
         while (true) {
-            const result = c.recv(
-                this.handle,
+            const result = w_recv(
+                socketToFd(this.handle),
                 @ptrCast(buf.ptr),
                 @intCast(buf.len),
                 0,
@@ -438,10 +646,10 @@ pub const TcpStream = struct {
 
     pub fn write(this: *TcpStream, data: []const u8) libws.Stream.WriteError!usize {
         while (true) {
-            const flags: c_int = if (is_linux) c.MSG_NOSIGNAL else 0;
+            const flags: c_int = if (is_linux) MSG_NOSIGNAL else 0;
 
-            const result = c.send(
-                this.handle,
+            const result = w_send(
+                socketToFd(this.handle),
                 @ptrCast(data.ptr),
                 @intCast(data.len),
                 flags,
@@ -463,18 +671,23 @@ pub const TcpStream = struct {
 
     pub inline fn close(this: *TcpStream) void {
         closeSocket(this.handle);
-        this.handle = INVALID_SOCKET;
+
+        if (comptime is_windows) {
+            this.handle = null;
+        } else {
+            this.handle = -1;
+        }
     }
 
     pub inline fn isValid(this: TcpStream) bool {
-        return this.handle != INVALID_SOCKET;
+        return !isInvalidSocket(this.handle);
     }
 
     pub inline fn getRemoteAddress(this: *TcpStream) ?Address {
-        var addr: c.sockaddr_in = undefined;
-        var len: socklen_t = @sizeOf(c.sockaddr_in);
+        var addr: sockaddr_in = undefined;
+        var len: socklen_t = @sizeOf(sockaddr_in);
 
-        if (c.getpeername(this.handle, @ptrCast(&addr), &len) == SOCKET_ERROR) {
+        if (w_getpeername(socketToFd(this.handle), @ptrCast(&addr), &len) == SOCKET_ERROR) {
             return null;
         }
 
@@ -539,28 +752,29 @@ pub const TcpListener = struct {
     };
 
     pub fn bind(address: Address, backlog: u31) BindError!TcpListener {
-        const sock = c.socket(c.AF_INET, c.SOCK_STREAM, c.IPPROTO_TCP);
+        const raw_sock = w_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-        if (sock == INVALID_SOCKET) {
+        if (raw_sock == -1) {
             return error.SocketCreateFailed;
         }
 
+        const sock = toSocket(raw_sock);
         errdefer closeSocket(sock);
 
         try setReuseAddr(sock);
         try setNonBlocking(sock);
 
-        const bind_result = c.bind(
-            sock,
+        const bind_result = w_bind(
+            socketToFd(sock),
             @ptrCast(&address.addr),
-            @sizeOf(c.sockaddr_in),
+            @sizeOf(sockaddr_in),
         );
 
         if (bind_result == SOCKET_ERROR) {
             return error.BindFailed;
         }
 
-        const listen_result = c.listen(sock, @intCast(backlog));
+        const listen_result = w_listen(socketToFd(sock), @intCast(backlog));
         if (listen_result == SOCKET_ERROR) {
             return error.ListenFailed;
         }
@@ -569,16 +783,16 @@ pub const TcpListener = struct {
     }
 
     pub fn accept(this: *TcpListener, allocator: std.mem.Allocator) libws.Listener.AcceptError!libws.Stream {
-        var client_addr: c.sockaddr_in = undefined;
-        var addr_len: socklen_t = @sizeOf(c.sockaddr_in);
+        var client_addr: sockaddr_in = undefined;
+        var addr_len: socklen_t = @sizeOf(sockaddr_in);
 
-        const client_sock = c.accept(
-            this.handle,
+        const raw_client = w_accept(
+            socketToFd(this.handle),
             @ptrCast(&client_addr),
             &addr_len,
         );
 
-        if (client_sock == INVALID_SOCKET) {
+        if (raw_client == -1) {
             const err = getLastError();
 
             if (isWouldBlock(err)) {
@@ -587,6 +801,8 @@ pub const TcpListener = struct {
 
             return error.Unexpected;
         }
+
+        const client_sock = toSocket(raw_client);
 
         // Configure accepted socket
         setNonBlocking(client_sock) catch {
@@ -616,18 +832,23 @@ pub const TcpListener = struct {
 
     pub inline fn deinit(this: *TcpListener) void {
         closeSocket(this.handle);
-        this.handle = INVALID_SOCKET;
+
+        if (comptime is_windows) {
+            this.handle = null;
+        } else {
+            this.handle = -1;
+        }
     }
 
     pub inline fn isValid(this: TcpListener) bool {
-        return this.handle != INVALID_SOCKET;
+        return !isInvalidSocket(this.handle);
     }
 
     pub inline fn getLocalAddress(this: TcpListener) ?Address {
-        var addr: c.sockaddr_in = undefined;
-        var len: socklen_t = @sizeOf(c.sockaddr_in);
+        var addr: sockaddr_in = undefined;
+        var len: socklen_t = @sizeOf(sockaddr_in);
 
-        if (c.getsockname(this.handle, @ptrCast(&addr), &len) == SOCKET_ERROR) {
+        if (w_getsockname(socketToFd(this.handle), @ptrCast(&addr), &len) == SOCKET_ERROR) {
             return null;
         }
 
@@ -653,8 +874,8 @@ pub const TcpListener = struct {
 pub const NativeTimeProvider = struct {
     pub fn milliTimestamp(_: *anyopaque) i64 {
         if (comptime is_windows) {
-            var ft: c.FILETIME = undefined;
-            c.GetSystemTimeAsFileTime(&ft);
+            var ft: FILETIME = undefined;
+            GetSystemTimeAsFileTime(&ft);
 
             // FILETIME is 100-nanosecond intervals since Jan 1, 1601
             const intervals: u64 = (@as(u64, ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
@@ -666,8 +887,8 @@ pub const NativeTimeProvider = struct {
             // Convert to milliseconds
             return @intCast(unix_intervals / 10000);
         } else {
-            var tv: c.timeval = undefined;
-            _ = c.gettimeofday(&tv, null);
+            var tv: timeval = undefined;
+            _ = gettimeofday(&tv, null);
 
             return @as(i64, tv.tv_sec) * 1000 + @divTrunc(@as(i64, tv.tv_usec), 1000);
         }
@@ -677,7 +898,7 @@ pub const NativeTimeProvider = struct {
         return .{
             .ptr = undefined,
             .vtable = &.{
-                .milliTimestamp = milliTimestamp,
+                .milliTimestamp = NativeTimeProvider.milliTimestamp,
             },
         };
     }
@@ -687,23 +908,23 @@ pub const Timezone = struct {
     offset_seconds: i32,
 
     pub fn getLocal() Timezone {
-        var t: c.time_t = @intCast(std.time.timestamp());
+        var t: isize = @intCast(std.Io.Timestamp.now(z.getState().io.io(), .real).toSeconds());
 
-        const local_ptr = c.localtime(&t);
+        const local_ptr = localtime(&t);
 
         if (local_ptr == null) {
             return .{ .offset_seconds = 0 };
         }
 
-        const local_tm = local_ptr.*;
+        const local_tm = local_ptr.?.*;
 
-        const utc_ptr = c.gmtime(&t);
+        const utc_ptr = gmtime(&t);
 
         if (utc_ptr == null) {
             return .{ .offset_seconds = 0 };
         }
 
-        const utc_tm = utc_ptr.*;
+        const utc_tm = utc_ptr.?.*;
 
         const local_hours: i32 = @intCast(local_tm.tm_hour);
         const utc_hours: i32 = @intCast(utc_tm.tm_hour);

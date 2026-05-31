@@ -149,7 +149,7 @@ const Server = struct {
     }
 
     pub inline fn tick(this: *Server, allocator: std.mem.Allocator) WsTickError!void {
-        const now = std.time.milliTimestamp();
+        const now = std.Io.Timestamp.now(z.getState().io.io(), .real).toMicroseconds();
 
         // Accept new connections
         while (true) {
@@ -445,7 +445,7 @@ const Server = struct {
             }
         }
 
-        this.tick_duration_ms = std.time.milliTimestamp() - now;
+        this.tick_duration_ms = std.Io.Timestamp.now(z.getState().io.io(), .real).toMilliseconds() - now;
     }
 
     pub inline fn removeConnection(this: *Server, allocator: std.mem.Allocator, idx: usize) void {

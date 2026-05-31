@@ -33,7 +33,7 @@ pub export fn Z_crypto_random_base64(argc: x.u4c, argv: [*c]x.ByondValue) z.Retu
     };
     defer state.allocator.free(bytes);
 
-    std.crypto.random.bytes(bytes);
+    std.Io.random(z.getState().io.io(), bytes);
 
     const base64_len = base64_encoder.calcSize(bytes.len);
     const base64 = state.allocator.allocSentinel(u8, base64_len, 0) catch {

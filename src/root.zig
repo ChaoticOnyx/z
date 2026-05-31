@@ -30,38 +30,10 @@ pub const std_options: std.Options = .{
     .logFn = logger.stdLogFn,
 };
 
-inline fn dumpStackTrace(stack_trace: std.builtin.StackTrace, writer: *std.Io.Writer) void {
-    const debug_info = std.debug.getSelfDebugInfo() catch |err| {
-        writer.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
-
-        return;
-    };
-
-    std.debug.writeStackTrace(stack_trace, writer, debug_info, .no_color) catch |err| {
-        writer.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
-
-        return;
-    };
-}
-
 fn panicFn(msg: []const u8, rt: ?usize) noreturn {
+    _ = rt;
+
     std.log.err("Panic: {s}", .{msg});
-    @breakpoint();
-
-    var buffer: [4096]u8 = undefined;
-
-    var writer = logger.getWriter(&buffer) catch {
-        std.process.exit(1);
-    };
-    defer writer.file.close();
-
-    if (@errorReturnTrace()) |t| {
-        dumpStackTrace(t.*, &writer.interface);
-    }
-
-    std.debug.dumpCurrentStackTraceToWriter(rt orelse @returnAddress(), &writer.interface) catch {};
-    writer.interface.flush() catch {};
-
     std.process.exit(1);
 }
 
@@ -69,9 +41,11 @@ const State = struct {
     allocator: std.mem.Allocator,
     mstate: machines.State,
     wsstate: ws.State,
+    io: std.Io.Threaded = .init_single_threaded,
     last_error: ?[:0]const u8 = null,
 
     pub inline fn deinit(this: *State) void {
+        this.io.deinit();
         this.mstate.deinit();
         this.wsstate.deinit();
 

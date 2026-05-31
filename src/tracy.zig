@@ -435,25 +435,33 @@ pub const Lz4 = struct {
     }
 };
 
-const c = @cImport({
-    if (os.is_windows) {
-        @cDefine("WIN32_LEAN_AND_MEAN", "1");
-        @cInclude("windows.h");
-    } else {
-        @cInclude("time.h");
-        @cInclude("unistd.h");
-        @cInclude("sys/types.h");
-    }
-});
+const CLOCK_MONOTONIC_RAW: c_int = 4;
+
+const timespec = extern struct {
+    tv_sec: isize,
+    tv_nsec: isize,
+};
+
+extern fn clock_gettime(clockid: c_int, tp: *timespec) c_int;
+extern fn getpid() c_int;
+
+const LARGE_INTEGER = extern struct {
+    QuadPart: i64,
+};
+
+extern "kernel32" fn QueryPerformanceCounter(lpPerformanceCount: *LARGE_INTEGER) callconv(.winapi) c_int;
+extern "kernel32" fn QueryPerformanceFrequency(lpFrequency: *LARGE_INTEGER) callconv(.winapi) c_int;
+extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+extern "kernel32" fn GetCurrentThreadId() callconv(.winapi) u32;
 
 pub fn getTime() i64 {
     if (comptime os.is_windows) {
-        var counter: c.LARGE_INTEGER = undefined;
-        _ = c.QueryPerformanceCounter(&counter);
+        var counter: LARGE_INTEGER = undefined;
+        _ = QueryPerformanceCounter(&counter);
         return counter.QuadPart;
     } else if (comptime os.is_linux) {
-        var ts: c.timespec = undefined;
-        _ = c.clock_gettime(c.CLOCK_MONOTONIC_RAW, &ts);
+        var ts: timespec = undefined;
+        _ = clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
         return @as(i64, ts.tv_sec) * 1_000_000_000 + ts.tv_nsec;
     } else {
         return std.time.nanoTimestamp();
@@ -462,8 +470,8 @@ pub fn getTime() i64 {
 
 pub fn getTimerMul() f64 {
     if (comptime os.is_windows) {
-        var freq: c.LARGE_INTEGER = undefined;
-        _ = c.QueryPerformanceFrequency(&freq);
+        var freq: LARGE_INTEGER = undefined;
+        _ = QueryPerformanceFrequency(&freq);
         return 1_000_000_000.0 / @as(f64, @floatFromInt(freq.QuadPart));
     } else {
         return 1.0;
@@ -472,8 +480,8 @@ pub fn getTimerMul() f64 {
 
 pub fn getResolution() u64 {
     if (comptime os.is_windows) {
-        var freq: c.LARGE_INTEGER = undefined;
-        _ = c.QueryPerformanceFrequency(&freq);
+        var freq: LARGE_INTEGER = undefined;
+        _ = QueryPerformanceFrequency(&freq);
         return @intCast(freq.QuadPart);
     } else {
         return 1_000_000_000;
@@ -486,15 +494,15 @@ pub fn getEpoch() u64 {
 
 pub fn getPid() u64 {
     if (comptime os.is_windows) {
-        return c.GetCurrentProcessId();
+        return GetCurrentProcessId();
     } else {
-        return @intCast(c.getpid());
+        return @intCast(getpid());
     }
 }
 
 pub fn getThreadId() u32 {
     if (comptime os.is_windows) {
-        return c.GetCurrentThreadId();
+        return GetCurrentThreadId();
     } else if (comptime os.is_linux) {
         return @intCast(std.os.linux.gettid());
     } else {
