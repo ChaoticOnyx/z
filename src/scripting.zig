@@ -273,6 +273,7 @@ const Script = struct {
     vm: ?*c.basic26_Vm,
     state: ?*c.basic26_State,
     script: ?*c.basic26_Script,
+    debug_info: ?*c.basic26_DebugInfo,
     objects: std.ArrayList(Pair),
     functions: std.ArrayList(Function),
     compile_error: ?CompileErrorInfo,
@@ -283,27 +284,28 @@ const Script = struct {
         this.allocator = .init(allocator, memory_size);
 
         if (c.basic26_Vm_create(&.{
-            .alloc = &.{
-                .userdata = this,
-                .alloc = vm_alloc,
-                .free = vm_free,
-            },
+            .userdata = this,
+            .alloc = vm_alloc,
+            .free = vm_free,
         }, &this.vm) != c.BASIC26_RESULT_OK) {
             return error.OutOfMemory;
         }
         errdefer c.basic26_Vm_destroy(this.vm.?);
 
-        if (c.basic26_State_create(&.{
-            .vm = this.vm.?,
-        }, &this.state) != c.BASIC26_RESULT_OK) {
+        if (c.basic26_State_create(this.vm.?, &this.state) != c.BASIC26_RESULT_OK) {
             return error.OutOfMemory;
         }
-        errdefer c.basic26_State_destroy(this.state.?, this.vm.?);
+        errdefer c.basic26_State_destroy(this.state.?);
 
         if (c.basic26_Script_create(this.vm.?, &this.script) != c.BASIC26_RESULT_OK) {
             return error.OutOfMemory;
         }
-        errdefer c.basic26_Script_destroy(this.script.?, this.vm.?);
+        errdefer c.basic26_Script_destroy(this.script.?);
+
+        if (c.basic26_DebugInfo_create(this.vm.?, &this.debug_info) != c.BASIC26_RESULT_OK) {
+            return error.OutOfMemory;
+        }
+        errdefer c.basic26_DebugInfo_destroy(this.debug_info.?);
 
         x.ByondValue_IncRef(&src);
         this.src = src;
@@ -327,8 +329,9 @@ const Script = struct {
 
         this.functions.deinit(this.allocator.allocator());
 
-        c.basic26_Script_destroy(this.script, this.vm);
-        c.basic26_State_destroy(this.state, this.vm);
+        c.basic26_DebugInfo_destroy(this.debug_info);
+        c.basic26_Script_destroy(this.script);
+        c.basic26_State_destroy(this.state);
         c.basic26_Vm_destroy(this.vm);
 
         x.ByondValue_DecRef(&this.src);
@@ -998,13 +1001,13 @@ pub const State = struct {
         var compile_error: c.basic26_CompileErrorInfo = .{};
 
         switch (c.basic26_Script_compile(script.script, &.{
-            .vm = script.vm,
             .source = source.ptr,
             .source_len = source.len,
             .limits = &.{
                 .max_opcodes = max_opcodes,
                 .max_strings = max_strings,
             },
+            .debug_info = script.debug_info.?,
         }, &compile_error)) {
             c.BASIC26_RESULT_OK => {
                 return .ok;
@@ -1205,7 +1208,7 @@ pub const State = struct {
 
         var pos: usize = 0;
 
-        if (c.basic26_Script_get_op_pos(script.script, ip, &pos) != c.BASIC26_RESULT_OK) {
+        if (c.basic26_DebugInfo_get_source_pos(script.debug_info.?, ip, &pos) != c.BASIC26_RESULT_OK) {
             z.getState().last_error = @errorName(GetOpPos.OutOfRange);
 
             return GetOpPos.OutOfRange;

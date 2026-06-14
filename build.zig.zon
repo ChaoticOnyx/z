@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .basic26 = .{
-            .url = "git+https://github.com/igorsaux/BASIC26#941c4f42e4697c1e60cbe83875cbd808143334e6",
-            .hash = "basic26-0.0.0-XEwF70u6AgBEPVp6nHmc7XU4VMzt67mcTwJQho48tyXI",
+            .url = "git+https://github.com/igorsaux/BASIC26#fe1d292da6d6ef16ce53e3e1721614b743c60532",
+            .hash = "basic26-0.0.0-XEwF740oAwBkkwI3jc-hsKmH33fGVK2Iz0mMyEqwDSJh",
         },
     },
 
