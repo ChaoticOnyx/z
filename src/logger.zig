@@ -31,7 +31,7 @@ pub inline fn getWriter(io: std.Io, buffer: []u8) !std.Io.File.Writer {
     return writer;
 }
 
-pub fn stdLogFn(
+pub fn logFn(
     comptime message_level: std.log.Level,
     comptime scope: @TypeOf(.enum_literal),
     comptime format: []const u8,

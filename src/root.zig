@@ -28,7 +28,7 @@ comptime {
 pub const panic = std.debug.FullPanic(panicFn);
 
 pub const std_options: std.Options = .{
-    .logFn = logger.stdLogFn,
+    .logFn = logger.logFn,
 };
 
 fn panicFn(msg: []const u8, rt: ?usize) noreturn {

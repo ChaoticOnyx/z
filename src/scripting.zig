@@ -57,8 +57,33 @@ const Typing = packed struct {
     varargs: bool = false,
     _padding: u24 = 0,
 
+    pub inline fn any() Typing {
+        return .{
+            .null = true,
+            .int = true,
+            .float = true,
+            .string = true,
+            .symbol = true,
+            .object = true,
+            .address = true,
+        };
+    }
+
+    pub inline fn anyVarargs() Typing {
+        return .{
+            .null = true,
+            .int = true,
+            .float = true,
+            .string = true,
+            .symbol = true,
+            .object = true,
+            .address = true,
+            .varargs = true,
+        };
+    }
+
     pub inline fn isAny(this: Typing) bool {
-        return this == Typing{};
+        return this.null and this.int and this.float and this.string and this.symbol and this.object and this.address;
     }
 
     pub inline fn isTypeAllowed(this: Typing, ty: c_uint) bool {
@@ -190,25 +215,706 @@ const LimitedAllocator = struct {
 };
 
 const ManagedObject = struct {
-    src: x.ByondValue,
-    gc_mark: bool,
+    pub const Value = union(enum) {
+        pub const Byond = struct {
+            src: x.ByondValue = .{},
 
-    pub inline fn init(this: *ManagedObject, src: x.ByondValue) void {
-        x.ByondValue_IncRef(&src);
+            pub inline fn init(src: x.ByondValue) Byond {
+                x.ByondValue_IncRef(&src);
 
-        this.* = .{
-            .src = src,
-            .gc_mark = false,
+                return .{ .src = src };
+            }
+
+            pub inline fn deinit(this: *Byond) void {
+                x.ByondValue_DecRef(&this.src);
+            }
         };
+
+        pub const Array = struct {
+            data: std.ArrayList(c.basic26_Value) = .empty,
+
+            pub inline fn init() Array {
+                return .{};
+            }
+
+            pub inline fn deinit(this: *Array, allocator: std.mem.Allocator) void {
+                this.data.deinit(allocator);
+            }
+
+            fn createFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 1) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const object = script.allocator.allocator().create(ManagedObject) catch {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+                object.initArray();
+
+                script.objects.append(script.allocator.allocator(), .init(.{}, object)) catch {
+                    object.deinit(script.allocator.allocator());
+                    script.allocator.allocator().destroy(object);
+
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+
+                const value = c.basic26_Value{
+                    .type = c.BASIC26_VALUE_TYPE_OBJECT,
+                    .as = .{ .object_ptr = object },
+                };
+
+                if (c.basic26_State_set_var(script.state.?, args[0].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    _ = script.objects.pop();
+                    object.deinit(script.allocator.allocator());
+                    script.allocator.allocator().destroy(object);
+
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn pushFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len < 2) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                for (args[1..]) |arg| {
+                    if (arg.type == c.BASIC26_VALUE_TYPE_OBJECT) {
+                        const push_obj: *const ManagedObject = @ptrCast(@alignCast(arg.as.object_ptr));
+
+                        if (push_obj.value == .array) {
+                            return c.BASIC26_FUNCTION_RESULT_ERROR;
+                        }
+                    }
+
+                    obj.value.array.data.append(script.allocator.allocator(), arg) catch {
+                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                    };
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn popFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 2) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const items = &obj.value.array.data;
+
+                if (items.items.len == 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const value = items.pop().?;
+
+                if (args[1].type == c.BASIC26_VALUE_TYPE_NULL) {
+                    return c.BASIC26_FUNCTION_RESULT_OK;
+                }
+
+                if (c.basic26_State_set_var(script.state.?, args[1].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn atFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[1].as.int_val < 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const idx: usize = @intCast(args[1].as.int_val);
+                const array = &obj.value.array.data;
+
+                if (idx >= array.items.len) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const value = array.items[idx];
+
+                if (c.basic26_State_set_var(script.state.?, args[2].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn setFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                _ = script;
+
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[1].as.int_val < 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const idx: usize = @intCast(args[1].as.int_val);
+                const array = &obj.value.array.data;
+
+                if (idx >= array.items.len) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const value = args[2];
+
+                if (value.type == c.BASIC26_VALUE_TYPE_OBJECT) {
+                    const value_obj: *const ManagedObject = @ptrCast(@alignCast(value.as.object_ptr));
+
+                    if (value_obj.value == .array) {
+                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                    }
+                }
+
+                array.items[idx] = value;
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn lenFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 2) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const len: c.basic26_Value = .{
+                    .type = c.BASIC26_VALUE_TYPE_INT,
+                    .as = .{
+                        .int_val = obj.value.array.data.items.len,
+                    },
+                };
+
+                if (c.basic26_State_set_var(script.state.?, args[1].as.symbol_id, &len) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn removeFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[1].as.int_val < 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const idx: usize = @intCast(args[1].as.int_val);
+                const array = &obj.value.array.data;
+
+                if (idx >= array.items.len) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const value = array.orderedRemove(idx);
+
+                if (args[2].type == c.BASIC26_VALUE_TYPE_NULL) {
+                    return c.BASIC26_FUNCTION_RESULT_OK;
+                }
+
+                if (c.basic26_State_set_var(script.state.?, args[2].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn insertFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[1].as.int_val < 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const idx: usize = @intCast(args[1].as.int_val);
+                const array = &obj.value.array.data;
+
+                if (idx > array.items.len) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const value = args[2];
+
+                if (value.type == c.BASIC26_VALUE_TYPE_OBJECT) {
+                    const value_obj: *const ManagedObject = @ptrCast(@alignCast(value.as.object_ptr));
+
+                    if (value_obj.value == .array) {
+                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                    }
+                }
+
+                array.insert(script.allocator.allocator(), idx, value) catch {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn clearFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                _ = script;
+
+                if (args.len != 1) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .array) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                obj.value.array.data.clearRetainingCapacity();
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+        };
+
+        pub const Text = struct {
+            data: std.ArrayList(u8) = .empty,
+
+            pub inline fn init() Text {
+                return .{};
+            }
+
+            pub inline fn deinit(this: *Text, allocator: std.mem.Allocator) void {
+                this.data.deinit(allocator);
+            }
+
+            fn createFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 1) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const object = script.allocator.allocator().create(ManagedObject) catch {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+                object.initText();
+
+                script.objects.append(script.allocator.allocator(), .init(.{}, object)) catch {
+                    object.deinit(script.allocator.allocator());
+                    script.allocator.allocator().destroy(object);
+
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+
+                const value = c.basic26_Value{
+                    .type = c.BASIC26_VALUE_TYPE_OBJECT,
+                    .as = .{ .object_ptr = object },
+                };
+
+                if (c.basic26_State_set_var(script.state.?, args[0].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    _ = script.objects.pop();
+                    object.deinit(script.allocator.allocator());
+                    script.allocator.allocator().destroy(object);
+
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn appendFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len == 0) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .text) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const text = &obj.value.text.data;
+
+                if (args.len == 1) {
+                    return c.BASIC26_FUNCTION_RESULT_OK;
+                }
+
+                for (args[1..]) |arg| {
+                    switch (arg.type) {
+                        c.BASIC26_VALUE_TYPE_NULL => {
+                            text.print(script.allocator.allocator(), "NULL", .{}) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                        },
+                        c.BASIC26_VALUE_TYPE_INT => {
+                            text.print(script.allocator.allocator(), "{}", .{arg.as.int_val}) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                        },
+                        c.BASIC26_VALUE_TYPE_FLOAT => {
+                            text.print(script.allocator.allocator(), "{}", .{arg.as.float_val}) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                        },
+                        c.BASIC26_VALUE_TYPE_STRING, c.BASIC26_VALUE_TYPE_SYMBOL => {
+                            var str: ?[*]const u8 = null;
+                            var str_len: usize = 0;
+
+                            const string_id = if (arg.type == c.BASIC26_VALUE_TYPE_STRING)
+                                arg.as.string_id
+                            else
+                                arg.as.symbol_id;
+
+                            if (c.basic26_Vm_get_string(script.vm, string_id, &str, &str_len) != c.BASIC26_RESULT_OK) {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            }
+
+                            text.print(script.allocator.allocator(), "{s}", .{str.?[0..str_len]}) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                        },
+                        c.BASIC26_VALUE_TYPE_OBJECT => {
+                            const arg_obj: *const ManagedObject = @ptrCast(@alignCast(arg.as.object_ptr));
+
+                            switch (arg_obj.value) {
+                                .byond => {
+                                    const zstr = x.toString(script.allocator.allocator(), &arg_obj.value.byond.src) catch {
+                                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                                    };
+                                    defer script.allocator.allocator().free(zstr);
+
+                                    // 🖕🖕🖕
+                                    const str = zstr[0..std.mem.findSentinel(u8, 0, zstr.ptr)];
+
+                                    text.print(script.allocator.allocator(), "{s}", .{str}) catch {
+                                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                                    };
+                                },
+                                .text => {
+                                    text.print(script.allocator.allocator(), "{s}", .{arg_obj.value.text.data.items}) catch {
+                                        return c.BASIC26_FUNCTION_RESULT_ERROR;
+                                    };
+                                },
+                                else => {
+                                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                                },
+                            }
+                        },
+                        c.BASIC26_VALUE_TYPE_ADDRESS => {
+                            text.print(script.allocator.allocator(), "{}", .{arg.as.address_val}) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                        },
+                        else => return c.BASIC26_FUNCTION_RESULT_ERROR,
+                    }
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn startsWithFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .text) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const needle = getStr(script, args[1]) orelse {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+
+                const starts = std.mem.startsWith(u8, obj.value.text.data.items, needle);
+                const value: c.basic26_Value = .{
+                    .type = c.BASIC26_VALUE_TYPE_INT,
+                    .as = .{
+                        .int_val = if (starts)
+                            1
+                        else
+                            0,
+                    },
+                };
+
+                if (c.basic26_State_set_var(script.state, args[2].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn endsWithFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                if (args.len != 3) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .text) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const needle = getStr(script, args[1]) orelse {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                };
+
+                const starts = std.mem.endsWith(u8, obj.value.text.data.items, needle);
+                const value: c.basic26_Value = .{
+                    .type = c.BASIC26_VALUE_TYPE_INT,
+                    .as = .{
+                        .int_val = if (starts)
+                            1
+                        else
+                            0,
+                    },
+                };
+
+                if (c.basic26_State_set_var(script.state, args[2].as.symbol_id, &value) != c.BASIC26_RESULT_OK) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            fn clearFunction(
+                script: *Script,
+                args: []const c.basic26_Value,
+            ) c.basic26_FunctionResult {
+                _ = script;
+
+                if (args.len != 1) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (args[0].type != c.BASIC26_VALUE_TYPE_OBJECT) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const obj: *ManagedObject = @ptrCast(@alignCast(args[0].as.object_ptr));
+
+                if (obj.value != .text) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                obj.value.text.data.clearRetainingCapacity();
+
+                return c.BASIC26_FUNCTION_RESULT_OK;
+            }
+
+            inline fn getStr(script: *Script, value: c.basic26_Value) ?[]const u8 {
+                switch (value.type) {
+                    c.BASIC26_VALUE_TYPE_STRING => {
+                        var str: ?[*]const u8 = null;
+                        var str_len: usize = 0;
+
+                        if (c.basic26_Vm_get_string(script.vm, value.as.string_id, &str, &str_len) != c.BASIC26_RESULT_OK) {
+                            return null;
+                        }
+
+                        return str.?[0..str_len];
+                    },
+                    c.BASIC26_VALUE_TYPE_OBJECT => {
+                        const args_obj: *const ManagedObject = @ptrCast(@alignCast(value.as.object_ptr));
+
+                        if (args_obj.value != .text) {
+                            return null;
+                        }
+
+                        return args_obj.value.text.data.items;
+                    },
+                    else => return null,
+                }
+            }
+        };
+
+        byond: Byond,
+        array: Array,
+        text: Text,
+
+        pub inline fn deinit(this: *Value, allocator: std.mem.Allocator) void {
+            switch (this.*) {
+                .byond => this.byond.deinit(),
+                .array => this.array.deinit(allocator),
+                .text => this.text.deinit(allocator),
+            }
+        }
+    };
+
+    value: Value,
+    gc_mark: bool = false,
+
+    pub inline fn initByond(this: *ManagedObject, src: x.ByondValue) void {
+        this.value = .{ .byond = .init(src) };
     }
 
-    pub inline fn deinit(this: *ManagedObject) void {
-        x.ByondValue_DecRef(&this.src);
+    pub inline fn initArray(this: *ManagedObject) void {
+        this.value = .{ .array = .init() };
+    }
+
+    pub inline fn initText(this: *ManagedObject) void {
+        this.value = .{ .text = .init() };
+    }
+
+    pub inline fn deinit(this: *ManagedObject, allocator: std.mem.Allocator) void {
+        this.value.deinit(allocator);
         this.gc_mark = false;
+    }
+
+    pub fn gcMark(this: *ManagedObject) void {
+        if (this.gc_mark) {
+            return;
+        }
+
+        this.gc_mark = true;
+
+        switch (this.value) {
+            .byond => {},
+            .array => {
+                for (this.value.array.data.items) |item| {
+                    if (item.type == c.BASIC26_VALUE_TYPE_OBJECT) {
+                        const inner: *ManagedObject = @ptrCast(@alignCast(item.as.object_ptr));
+
+                        if (inner.value == .array) {
+                            std.log.err("BUG: An array inside of an array!", .{});
+                        } else {
+                            inner.gcMark();
+                        }
+                    }
+                }
+            },
+            .text => {},
+        }
     }
 };
 
-const Function = struct {
+const ByondFunction = struct {
     name: c.basic26_SymbolId,
     callback: u32,
     src: ?x.ByondValue,
@@ -221,7 +927,7 @@ const Function = struct {
         src: ?x.ByondValue,
         typings: [MAX_ARGS]Typing,
         typings_len: usize,
-    ) Function {
+    ) ByondFunction {
         if (src != null) {
             x.ByondValue_IncRef(&src.?);
         }
@@ -235,10 +941,33 @@ const Function = struct {
         };
     }
 
-    pub inline fn deinit(this: *Function) void {
+    pub inline fn deinit(this: *ByondFunction) void {
         if (this.src != null) {
             x.ByondValue_DecRef(&this.src.?);
         }
+    }
+};
+
+const NativeFunction = struct {
+    const Callback = *const fn (script: *Script, args: []const c.basic26_Value) c.basic26_FunctionResult;
+
+    name: c.basic26_SymbolId,
+    callback: Callback,
+    typings: [MAX_ARGS]Typing,
+    typings_len: usize,
+
+    pub inline fn init(
+        name: c.basic26_SymbolId,
+        callback: Callback,
+        typings: [MAX_ARGS]Typing,
+        typings_len: usize,
+    ) NativeFunction {
+        return .{
+            .name = name,
+            .callback = callback,
+            .typings = typings,
+            .typings_len = typings_len,
+        };
     }
 };
 
@@ -275,7 +1004,8 @@ const Script = struct {
     script: ?*c.basic26_Script,
     debug_info: ?*c.basic26_DebugInfo,
     objects: std.ArrayList(Pair),
-    functions: std.ArrayList(Function),
+    byond_functions: std.ArrayList(ByondFunction),
+    native_functions: std.ArrayList(NativeFunction),
     compile_error: ?CompileErrorInfo,
     runtime_error: ?RuntimeError,
 
@@ -310,24 +1040,26 @@ const Script = struct {
         x.ByondValue_IncRef(&src);
         this.src = src;
         this.objects = .empty;
-        this.functions = .empty;
+        this.byond_functions = .empty;
+        this.native_functions = .empty;
         this.compile_error = null;
         this.runtime_error = null;
     }
 
     pub inline fn deinit(this: *Script) void {
         for (this.objects.items) |pair| {
-            pair.object.deinit();
+            pair.object.deinit(this.allocator.allocator());
             this.allocator.allocator().destroy(pair.object);
         }
 
         this.objects.deinit(this.allocator.allocator());
 
-        for (this.functions.items) |*func| {
+        for (this.byond_functions.items) |*func| {
             func.deinit();
         }
 
-        this.functions.deinit(this.allocator.allocator());
+        this.byond_functions.deinit(this.allocator.allocator());
+        this.native_functions.deinit(this.allocator.allocator());
 
         c.basic26_DebugInfo_destroy(this.debug_info);
         c.basic26_Script_destroy(this.script);
@@ -350,7 +1082,7 @@ const Script = struct {
         errdefer this.allocator.allocator().destroy(object);
 
         try this.objects.append(this.allocator.allocator(), .init(src, object));
-        object.init(src);
+        object.initByond(src);
 
         return object;
     }
@@ -375,7 +1107,7 @@ const Script = struct {
             }
 
             const object: *ManagedObject = @ptrCast(@alignCast(value.as.object_ptr));
-            object.gc_mark = true;
+            object.gcMark();
         }
 
         var i: usize = 0;
@@ -390,7 +1122,7 @@ const Script = struct {
                 continue;
             }
 
-            pair.object.deinit();
+            pair.object.deinit(this.allocator.allocator());
             this.allocator.allocator().destroy(pair.object);
             _ = this.objects.swapRemove(i);
         }
@@ -496,13 +1228,23 @@ const SetIpError = error{
     ScriptNotFound,
 };
 
-const GetOpPos = error{
+const GetOpPosError = error{
     ScriptNotFound,
     OutOfRange,
 };
 
-const GetUsedMemory = error{
+const GetUsedMemoryError = error{
     ScriptNotFound,
+};
+
+const RegisterBuiltinArrayError = error{
+    ScriptNotFound,
+    OutOfMemory,
+};
+
+const RegisterBuiltinTextError = error{
+    ScriptNotFound,
+    OutOfMemory,
 };
 
 pub const State = struct {
@@ -787,7 +1529,13 @@ pub const State = struct {
             c.BASIC26_VALUE_TYPE_OBJECT => {
                 const object: *const ManagedObject = @ptrCast(@alignCast(value.as.object_ptr));
 
-                return object.src;
+                if (object.value != .byond) {
+                    z.getState().last_error = @errorName(GetVarError.VarNotFound);
+
+                    return GetVarError.VarNotFound;
+                }
+
+                return object.value.byond.src;
             },
             else => {
                 z.getState().last_error = @errorName(GetVarError.VarNotFound);
@@ -872,7 +1620,7 @@ pub const State = struct {
             return;
         }
 
-        for (script.functions.items) |func| {
+        for (script.byond_functions.items) |func| {
             if (func.name == symbol_id) {
                 z.getState().last_error = @errorName(RegisterFunctionError.AlreadyExists);
 
@@ -923,7 +1671,7 @@ pub const State = struct {
             typings.appendAssumeCapacity(typing);
         }
 
-        script.functions.append(script.allocator.allocator(), .init(
+        script.byond_functions.append(script.allocator.allocator(), .init(
             symbol_id,
             callback,
             src,
@@ -937,7 +1685,7 @@ pub const State = struct {
 
         if (c.basic26_Vm_register_function(script.vm, &.{
             .name = symbol_id,
-            .callback = function_callback,
+            .callback = functionCallback,
         }) != c.BASIC26_RESULT_OK) {
             z.getState().last_error = @errorName(RegisterFunctionError.OutOfMemory);
 
@@ -960,12 +1708,12 @@ pub const State = struct {
 
         var i: usize = 0;
 
-        while (i < script.functions.items.len) : (i += 1) {
-            const func = &script.functions.items[i];
+        while (i < script.byond_functions.items.len) : (i += 1) {
+            const func = &script.byond_functions.items[i];
 
             if (func.name == symbol_id) {
                 func.deinit();
-                _ = script.functions.swapRemove(i);
+                _ = script.byond_functions.swapRemove(i);
 
                 break;
             }
@@ -1151,11 +1899,12 @@ pub const State = struct {
         });
 
         if (clear_functions) {
-            for (script.functions.items) |*func| {
+            for (script.byond_functions.items) |*func| {
                 func.deinit();
             }
 
-            script.functions.clearRetainingCapacity();
+            script.byond_functions.clearRetainingCapacity();
+            script.native_functions.clearRetainingCapacity();
         }
 
         c.basic26_State_clear(script.state.?, &.{
@@ -1199,32 +1948,236 @@ pub const State = struct {
         c.basic26_State_set_ip(script.state.?, ip);
     }
 
-    pub inline fn getOpPos(this: *State, id: Script.Id, ip: usize) GetOpPos!usize {
+    pub inline fn getOpPos(this: *State, id: Script.Id, ip: usize) GetOpPosError!usize {
         const script = this.findScript(id) orelse {
-            z.getState().last_error = @errorName(GetOpPos.ScriptNotFound);
+            z.getState().last_error = @errorName(GetOpPosError.ScriptNotFound);
 
-            return GetOpPos.ScriptNotFound;
+            return GetOpPosError.ScriptNotFound;
         };
 
         var pos: usize = 0;
 
         if (c.basic26_DebugInfo_get_source_pos(script.debug_info.?, ip, &pos) != c.BASIC26_RESULT_OK) {
-            z.getState().last_error = @errorName(GetOpPos.OutOfRange);
+            z.getState().last_error = @errorName(GetOpPosError.OutOfRange);
 
-            return GetOpPos.OutOfRange;
+            return GetOpPosError.OutOfRange;
         }
 
         return pos;
     }
 
-    pub inline fn getUsedMemory(this: *State, id: Script.Id) GetUsedMemory!usize {
+    pub inline fn getUsedMemory(this: *State, id: Script.Id) GetUsedMemoryError!usize {
         const script = this.findScript(id) orelse {
-            z.getState().last_error = @errorName(GetOpPos.ScriptNotFound);
+            z.getState().last_error = @errorName(GetOpPosError.ScriptNotFound);
 
-            return GetUsedMemory.ScriptNotFound;
+            return GetUsedMemoryError.ScriptNotFound;
         };
 
         return script.allocator.used;
+    }
+
+    pub inline fn registerBuiltinArray(this: *State, id: Script.Id) RegisterBuiltinArrayError!void {
+        const script = this.findScript(id) orelse {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.ScriptNotFound);
+
+            return RegisterBuiltinArrayError.ScriptNotFound;
+        };
+
+        // Array_Create out
+        registerNativeFunction(script, "Array_Create", ManagedObject.Value.Array.createFunction, &.{
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Push this, value
+        registerNativeFunction(script, "Array_Push", ManagedObject.Value.Array.pushFunction, &.{
+            .{ .object = true },
+            .anyVarargs(),
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Pop this, out
+        registerNativeFunction(script, "Array_Pop", ManagedObject.Value.Array.popFunction, &.{
+            .{ .object = true },
+            .{ .null = true, .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_At this, idx, out
+        registerNativeFunction(script, "Array_At", ManagedObject.Value.Array.atFunction, &.{
+            .{ .object = true },
+            .{ .int = true },
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Set this, idx, value
+        registerNativeFunction(script, "Array_Set", ManagedObject.Value.Array.setFunction, &.{
+            .{ .object = true },
+            .{ .int = true },
+            .any(),
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Len this, out
+        registerNativeFunction(script, "Array_Len", ManagedObject.Value.Array.lenFunction, &.{
+            .{ .object = true },
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Remove this, idx, out
+        registerNativeFunction(script, "Array_Remove", ManagedObject.Value.Array.removeFunction, &.{
+            .{ .object = true },
+            .{ .int = true },
+            .{ .null = true, .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Clear this, idx, value
+        registerNativeFunction(script, "Array_Insert", ManagedObject.Value.Array.insertFunction, &.{
+            .{ .object = true },
+            .{ .int = true },
+            .any(),
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+
+        // Array_Clear this
+        registerNativeFunction(script, "Array_Clear", ManagedObject.Value.Array.clearFunction, &.{
+            .{ .object = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinArrayError.OutOfMemory);
+
+            return RegisterBuiltinArrayError.OutOfMemory;
+        };
+    }
+
+    pub inline fn registerBuiltinText(this: *State, id: Script.Id) RegisterBuiltinTextError!void {
+        const script = this.findScript(id) orelse {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.ScriptNotFound);
+
+            return RegisterBuiltinTextError.ScriptNotFound;
+        };
+
+        // Text_Create out
+        registerNativeFunction(script, "Text_Create", ManagedObject.Value.Text.createFunction, &.{
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.OutOfMemory);
+
+            return RegisterBuiltinTextError.OutOfMemory;
+        };
+
+        // Text_Append this, args
+        registerNativeFunction(script, "Text_Append", ManagedObject.Value.Text.appendFunction, &.{
+            .{ .object = true },
+            .anyVarargs(),
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.OutOfMemory);
+
+            return RegisterBuiltinTextError.OutOfMemory;
+        };
+
+        // Text_StartsWith this, value, out
+        registerNativeFunction(script, "Text_StartsWith", ManagedObject.Value.Text.startsWithFunction, &.{
+            .{ .object = true },
+            .{ .string = true, .object = true },
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.OutOfMemory);
+
+            return RegisterBuiltinTextError.OutOfMemory;
+        };
+
+        // Text_EndsWith this, value, out
+        registerNativeFunction(script, "Text_EndsWith", ManagedObject.Value.Text.endsWithFunction, &.{
+            .{ .object = true },
+            .{ .string = true, .object = true },
+            .{ .symbol = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.OutOfMemory);
+
+            return RegisterBuiltinTextError.OutOfMemory;
+        };
+
+        // Text_Clear this
+        registerNativeFunction(script, "Text_Clear", ManagedObject.Value.Text.clearFunction, &.{
+            .{ .object = true },
+        }) catch {
+            z.getState().last_error = @errorName(RegisterBuiltinTextError.OutOfMemory);
+
+            return RegisterBuiltinTextError.OutOfMemory;
+        };
+    }
+
+    inline fn registerNativeFunction(
+        script: *Script,
+        name: []const u8,
+        callback: NativeFunction.Callback,
+        comptime typings: []const Typing,
+    ) error{OutOfMemory}!void {
+        var symbol_id: c.basic26_SymbolId = undefined;
+
+        if (c.basic26_Vm_get_string_id(script.vm.?, name.ptr, name.len, true, &symbol_id) != c.BASIC26_RESULT_OK) {
+            return error.OutOfMemory;
+        }
+
+        for (script.native_functions.items) |existing| {
+            if (existing.name == symbol_id) {
+                return error.OutOfMemory;
+            }
+        }
+
+        var typings_buffer = std.mem.zeroes([MAX_ARGS]Typing);
+        const typings_len = typings.len;
+
+        if (typings_len > MAX_ARGS) {
+            return error.OutOfMemory;
+        }
+
+        for (typings, 0..) |t, i| {
+            typings_buffer[i] = t;
+        }
+
+        script.native_functions.append(script.allocator.allocator(), .init(
+            symbol_id,
+            callback,
+            typings_buffer,
+            typings_len,
+        )) catch {
+            return error.OutOfMemory;
+        };
+
+        if (c.basic26_Vm_register_function(script.vm.?, &.{
+            .name = symbol_id,
+            .callback = functionCallback,
+        }) != c.BASIC26_RESULT_OK) {
+            return error.OutOfMemory;
+        }
     }
 
     const ScriptEntry = struct {
@@ -1256,15 +2209,21 @@ pub const State = struct {
         return null;
     }
 
-    fn function_callback(
+    fn functionCallback(
         info: ?*const c.basic26_CallInfo,
         argc: usize,
         argv: ?[*]const c.basic26_Value,
     ) callconv(.c) c.basic26_FunctionResult {
         const this: *Script = @ptrCast(@alignCast(info.?.userdata));
 
-        const func: Function = blk: {
-            for (this.functions.items) |func| {
+        for (this.native_functions.items) |*func| {
+            if (func.name == info.?.function_name) {
+                return nativeFunctionDispatch(this, func, argc, argv.?);
+            }
+        }
+
+        const func: ByondFunction = blk: {
+            for (this.byond_functions.items) |func| {
                 if (func.name == info.?.function_name) {
                     break :blk func;
                 }
@@ -1350,7 +2309,27 @@ pub const State = struct {
                 c.BASIC26_VALUE_TYPE_OBJECT => {
                     const object: *const ManagedObject = @ptrCast(@alignCast(arg.as.object_ptr));
 
-                    args.appendAssumeCapacity(object.src);
+                    switch (object.value) {
+                        .byond => {
+                            args.appendAssumeCapacity(object.value.byond.src);
+                        },
+                        .text => {
+                            const str = object.value.text.data.items;
+
+                            const zstr = this.allocator.allocator().dupeSentinel(u8, str, 0) catch {
+                                return c.BASIC26_FUNCTION_RESULT_ERROR;
+                            };
+                            defer this.allocator.allocator().free(zstr);
+
+                            var value: x.ByondValue = .{};
+                            x.ByondValue_SetStr(&value, zstr);
+
+                            args.appendAssumeCapacity(value);
+                        },
+                        else => {
+                            return c.BASIC26_FUNCTION_RESULT_ERROR;
+                        },
+                    }
                 },
                 else => {
                     args.appendAssumeCapacity(.{});
@@ -1391,6 +2370,46 @@ pub const State = struct {
             .err => c.BASIC26_FUNCTION_RESULT_ERROR,
             .yield => c.BASIC26_FUNCTION_RESULT_YIELD,
         };
+    }
+
+    inline fn nativeFunctionDispatch(
+        this: *Script,
+        func: *const NativeFunction,
+        argc: usize,
+        argv: [*]const c.basic26_Value,
+    ) c.basic26_FunctionResult {
+        if (argc > MAX_ARGS) {
+            return c.BASIC26_FUNCTION_RESULT_ERROR;
+        }
+
+        var varargs: ?Typing = null;
+        var i: usize = 0;
+
+        while (i < argc) : (i += 1) {
+            const arg = argv[i];
+
+            if (varargs) |va| {
+                if (!va.isTypeAllowed(arg.type)) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+            } else {
+                if (i >= func.typings_len) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                const typing = func.typings[i];
+
+                if (!typing.isTypeAllowed(arg.type)) {
+                    return c.BASIC26_FUNCTION_RESULT_ERROR;
+                }
+
+                if (typing.varargs) {
+                    varargs = typing;
+                }
+            }
+        }
+
+        return func.callback(this, argv[0..argc]);
     }
 };
 
@@ -1944,4 +2963,42 @@ export fn Z_script_get_used_memory(argc: x.u4c, argv: [*c]x.ByondValue) callconv
     };
 
     return z.returnCast(x.num(@truncate(ret)));
+}
+
+export fn Z_script_register_builtin_array(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
+    const args = argv[0..argc];
+
+    if (args.len != 1) {
+        x.Byond_CRASH("Z_script_register_builtin_array requires 1 argument");
+
+        return z.returnCast(.{});
+    }
+
+    const state = getState();
+    const id: Script.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
+
+    state.registerBuiltinArray(id) catch {
+        return z.returnCast(.{});
+    };
+
+    return z.returnCast(x.True());
+}
+
+export fn Z_script_register_builtin_text(argc: x.u4c, argv: [*c]x.ByondValue) callconv(.c) z.ReturnType {
+    const args = argv[0..argc];
+
+    if (args.len != 1) {
+        x.Byond_CRASH("Z_script_register_builtin_text requires 1 argument");
+
+        return z.returnCast(.{});
+    }
+
+    const state = getState();
+    const id: Script.Id = @intFromFloat(x.ByondValue_GetNum(&args[0]));
+
+    state.registerBuiltinText(id) catch {
+        return z.returnCast(.{});
+    };
+
+    return z.returnCast(x.True());
 }
